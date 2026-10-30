@@ -1,0 +1,51 @@
+{
+  "name": "zen-tiles",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:e2e": "playwright test",
+    "test:coverage": "vitest run --coverage",
+    "content:generate": "node --import tsx packages/content/scripts/generate.ts",
+    "content:validate": "node --import tsx packages/content/scripts/generate.ts --validate",
+    "format": "prettier --write src packages/engine/src packages/content/*.ts tests",
+    "content:daily": "node --import tsx packages/content/scripts/daily.ts",
+    "test:api": "python3 ../../scripts/test-api.py",
+    "test:fullstack": "ZEN_API_TESTS=1 playwright test tests/fullstack.spec.ts"
+  },
+  "dependencies": {
+    "@tailwindcss/vite": "4.3.3",
+    "dexie": "4.4.7",
+    "firebase": "12.19.0",
+    "phaser": "3.90.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "simple-icons": "15.22.0",
+    "tailwindcss": "4.3.3",
+    "zustand": "5.0.16"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.39.5",
+    "@playwright/test": "1.64.1",
+    "@prettier/plugin-php": "0.26.0",
+    "@types/node": "26.6.6",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitest/coverage-v8": "5.0.5",
+    "eslint": "9.39.5",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "fast-check": "4.10.2",
+    "prettier": "3.9.10",
+    "tsx": "4.23.15",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.72.1",
+    "vite": "8.3.5",
+    "vite-plugin-pwa": "2.0.0",
+    "vitest": "5.0.5"
+  }
+}

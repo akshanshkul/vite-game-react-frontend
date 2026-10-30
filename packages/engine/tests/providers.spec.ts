@@ -1,0 +1,2 @@
+import{it,expect}from'vitest';import{MockProviders}from'../../../src/services/providers';
+it('provider failure and cancelled consent cannot grant verified rewards',async()=>{expect(await new MockProviders().show(false)).toEqual({status:'cancelled',verified:false});expect(await new MockProviders().show(true)).toEqual({status:'unavailable',verified:false});expect(await new MockProviders(true).purchase('test',true)).toEqual({status:'completed',verified:false});});
