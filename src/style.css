@@ -2038,3 +2038,7 @@ details.danger summary {
 .muted.small {
   font-size: 11px;
 }
+
+iframe{
+  display: none;
+}
