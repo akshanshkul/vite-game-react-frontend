@@ -5,9 +5,11 @@ import { VitePWA } from "vite-plugin-pwa";
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
   const apiTarget =
+    env.VITE_API_TARGET ||
+    process.env.VITE_API_TARGET ||
     env.ZEN_API_TARGET ||
     process.env.ZEN_API_TARGET ||
-    "http://127.0.0.1:8080";
+    "https://sports.techcov.in";
 
   return {
     plugins: [
