@@ -1,0 +1,13 @@
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+[build.environment]
+  # Vite inlines client-side VITE_* variables into the JavaScript bundle.
+  # Omit them from Netlify Secrets Scanning to allow the build to complete.
+  SECRETS_SCAN_OMIT_KEYS = "VITE_FIREBASE_API_KEY,VITE_FIREBASE_APP_ID,VITE_FIREBASE_AUTH_DOMAIN,VITE_FIREBASE_MESSAGING_SENDER_ID,VITE_FIREBASE_PROJECT_ID,VITE_FIREBASE_STORAGE_BUCKET,VITE_API_TARGET,ZEN_API_TARGET"
+
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
