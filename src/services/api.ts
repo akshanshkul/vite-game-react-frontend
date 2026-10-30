@@ -10,14 +10,14 @@ export async function request<T>(
   method = body === undefined ? "GET" : "POST",
 ): Promise<T> {
   if (method !== "GET" && !csrf) {
-    const r = await fetch("/api/v1/auth/csrf", { credentials: "same-origin" });
+    const r = await fetch("/api/v1/auth/csrf", { credentials: "include" });
     if (!r.ok)
       throw Error("Account service unavailable. Local gameplay still works.");
     csrf = (await r.json()).token;
   }
   const response = await fetch(`/api/v1/${path}`, {
     method,
-    credentials: "same-origin",
+    credentials: "include",
     headers: {
       Accept: "application/json",
       ...(body === undefined ? {} : { "Content-Type": "application/json" }),
