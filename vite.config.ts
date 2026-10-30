@@ -1,9 +1,16 @@
-import { defineConfig } from "vite";
+import { defineConfig, loadEnv } from "vite";
 import tailwind from "@tailwindcss/vite";
 import { VitePWA } from "vite-plugin-pwa";
-const apiTarget = process.env.ZEN_API_TARGET || "http://127.0.0.1:8080";
-export default defineConfig({
-  plugins: [
+
+export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, process.cwd(), "");
+  const apiTarget =
+    env.ZEN_API_TARGET ||
+    process.env.ZEN_API_TARGET ||
+    "http://127.0.0.1:8080";
+
+  return {
+    plugins: [
     tailwind(),
     VitePWA({
       registerType: "prompt",
@@ -93,4 +100,5 @@ export default defineConfig({
       },
     },
   },
+};
 });

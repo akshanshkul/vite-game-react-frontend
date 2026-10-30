@@ -3,12 +3,22 @@
 // exchanged for the game's own session cookie; Firebase is then signed out.
 // These web config values are public identifiers, not secrets.
 const config = {
-  apiKey: "AIzaSyBiJM_ZMzqNnB_Ab6iCGcgjUikd6NQUiZA",
-  authDomain: "vite-game.firebaseapp.com",
-  projectId: "vite-game",
-  storageBucket: "vite-game.firebasestorage.app",
-  messagingSenderId: "252915203336",
-  appId: "1:252915203336:web:eec532792694e22c3080bd",
+  apiKey:
+    import.meta.env.VITE_FIREBASE_API_KEY ||
+    "AIzaSyBiJM_ZMzqNnB_Ab6iCGcgjUikd6NQUiZA",
+  authDomain:
+    import.meta.env.VITE_FIREBASE_AUTH_DOMAIN ||
+    "vite-game.firebaseapp.com",
+  projectId:
+    import.meta.env.VITE_FIREBASE_PROJECT_ID || "vite-game",
+  storageBucket:
+    import.meta.env.VITE_FIREBASE_STORAGE_BUCKET ||
+    "vite-game.firebasestorage.app",
+  messagingSenderId:
+    import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || "252915203336",
+  appId:
+    import.meta.env.VITE_FIREBASE_APP_ID ||
+    "1:252915203336:web:eec532792694e22c3080bd",
 };
 
 const messages: Record<string, string> = {
