@@ -5,6 +5,7 @@
 import { prng } from "../../packages/engine/src/index";
 import { MAX_UNDOS } from "./undos";
 import type { Profile } from "./storage";
+import { hasClaim, withClaim } from "./claims";
 /** Local calendar day as YYYY-MM-DD (not UTC: a player's "today"). */
 export const localDay = (d = new Date()) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -32,7 +33,7 @@ export function loginDayFor(p: Profile, today: string) {
   return l.lastClaim === previousDay(today) ? (l.day % 7) + 1 : 1;
 }
 export const canClaimLogin = (p: Profile, today: string) =>
-  p.login?.lastClaim !== today;
+  p.login?.lastClaim !== today && !hasClaim(p, `gift:${today}`);
 const grant = (p: Profile, r: Reward): Profile => ({
   ...p,
   bonusCoins: (p.bonusCoins ?? 0) + r.coins,
@@ -42,7 +43,10 @@ const grant = (p: Profile, r: Reward): Profile => ({
 export function claimLogin(p: Profile, today: string): Profile {
   if (!canClaimLogin(p, today)) return p;
   const day = loginDayFor(p, today);
-  return { ...grant(p, LOGIN_REWARDS[day - 1]), login: { day, lastClaim: today } };
+  return withClaim(
+    { ...grant(p, LOGIN_REWARDS[day - 1]), login: { day, lastClaim: today } },
+    `gift:${today}`,
+  );
 }
 
 /** What happened today, reset when the local day changes. */
@@ -102,11 +106,16 @@ export const missionDone = (m: Mission, t: TodayStats) => m.progress(t) >= m.tar
 export function claimMission(p: Profile, id: string, today: string): Profile {
   const t = todayStats(p, today),
     m = missionsFor(today).find((m) => m.id === id);
-  if (!m || t.claimed.includes(id) || !missionDone(m, t)) return p;
-  return {
-    ...grant(p, { coins: m.coins, undos: 0 }),
-    today: { ...t, claimed: [...t.claimed, id] },
-  };
+  const key = `mission:${today}:${id.toLowerCase()}`;
+  if (!m || t.claimed.includes(id) || hasClaim(p, key) || !missionDone(m, t))
+    return p;
+  return withClaim(
+    {
+      ...grant(p, { coins: m.coins, undos: 0 }),
+      today: { ...t, claimed: [...t.claimed, id] },
+    },
+    key,
+  );
 }
 /** Something on the Today sheet is waiting to be claimed. */
 export const hasClaimable = (p: Profile, today: string) => {
@@ -114,7 +123,12 @@ export const hasClaimable = (p: Profile, today: string) => {
   return (
     (p.chests ?? 0) > 0 ||
     canClaimLogin(p, today) ||
-    missionsFor(today).some((m) => missionDone(m, t) && !t.claimed.includes(m.id))
+    missionsFor(today).some(
+      (m) =>
+        missionDone(m, t) &&
+        !t.claimed.includes(m.id) &&
+        !hasClaim(p, `mission:${today}:${m.id.toLowerCase()}`),
+    )
   );
 };
 /** Records a cleared garden in today's stats. */

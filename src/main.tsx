@@ -71,6 +71,20 @@ import {
   starsGained,
   type PowerUp,
 } from "./services/chests";
+import { ledgerChanges } from "./services/ledger";
+import {
+  EVENT_BOARDS,
+  awardBadge,
+  daysUntilFestival,
+  eventBoardOpen,
+  eventCleared,
+  eventPuzzle,
+  eventPuzzleId,
+  packForWeek,
+  parseEventId,
+  weekendEvent,
+} from "./services/weekend";
+import { ensureOpening, queueLedger, syncState } from "./services/stateSync";
 import {
   earnUndos,
   migrateUndos,
@@ -326,14 +340,36 @@ function App() {
   /** Live profile for handlers that outlive a render (keyboard, win effect). */
   const profileRef = useRef(profile);
   profileRef.current = profile;
-  /** Send finished levels to the account so they count in player rankings. */
+  const showProfile = (next: Profile) => {
+    profileRef.current = next;
+    setProfile(next);
+  };
+  /**
+   * The one way to change the profile: any change in coins or undos also goes
+   * into the ledger outbox (with its reason) so it follows the account.
+   */
+  const commit = (next: Profile, reason: string) => {
+    const events = ledgerChanges(profileRef.current, next, reason, () =>
+      crypto.randomUUID(),
+    );
+    showProfile(next);
+    void queueLedger(events).catch(() => setSaveError(true));
+  };
+  /**
+   * Sends finished levels (for rankings) and the coins/undos/themes/claims
+   * ledger to the account, then shows the account's totals.
+   */
   const syncProgress = useCallback(() => {
     void db.meta
       .put({ id: "syncEnabled", value: true })
       .then(() => flushCompletions())
-      .then((items) => setProfile((p) => mergeProgress(p, items)))
+      .then((items) => {
+        showProfile(mergeProgress(profileRef.current, items));
+        return syncState(profileRef.current);
+      })
+      .then((apply) => showProfile(apply(profileRef.current)))
       .catch(() => {
-        /* Offline: the outbox keeps them and retries on reconnect. */
+        /* Offline: both outboxes keep their entries and retry on reconnect. */
       });
   }, []);
   // Signing in also sends wins earned while playing as a guest.
@@ -452,16 +488,19 @@ function App() {
       .then(async ([saved, p, config, tutorial, signedIn, mine]) => {
         if (!active) return;
         setCustomTiles(mine);
-        if (p?.value && typeof p.value === "object")
-          setProfile(
-            migrateUndos({
-              ...defaultProfile,
-              ...p.value,
-              undos: (p.value as Partial<Profile>).undos as number,
-              undoMilestones: (p.value as Partial<Profile>)
-                .undoMilestones as number,
-            }),
-          );
+        const restored =
+          p?.value && typeof p.value === "object"
+            ? migrateUndos({
+                ...defaultProfile,
+                ...p.value,
+                undos: (p.value as Partial<Profile>).undos as number,
+                undoMilestones: (p.value as Partial<Profile>)
+                  .undoMilestones as number,
+              })
+            : defaultProfile;
+        if (restored !== defaultProfile) setProfile(restored);
+        // What this device held before coins/undos synced counts once.
+        await ensureOpening(restored);
         if (config?.value && typeof config.value === "object")
           setSettings({
             ...settings,
@@ -479,7 +518,12 @@ function App() {
             candidate =
               n !== null && isEndless(n)
                 ? await endlessPuzzle(n)
-                : (levels.find((l) => l.puzzle.id === saved.puzzleId)?.puzzle ??
+                : typeof saved.puzzleId === "string" && parseEventId(saved.puzzleId)
+                  ? eventPuzzle(
+                      parseEventId(saved.puzzleId)!.key,
+                      parseEventId(saved.puzzleId)!.board,
+                    )
+                  : (levels.find((l) => l.puzzle.id === saved.puzzleId)?.puzzle ??
                   (typeof saved.puzzleId === "string" &&
                   /^daily-\d{4}-\d{2}-\d{2}$/.test(saved.puzzleId)
                     ? daily(saved.puzzleId.slice(6))
@@ -621,8 +665,11 @@ function App() {
         ),
         withStars = addStars(recorded, newStars);
       setWinStats((w) => (w ? { ...w, newStars } : w));
-      profileRef.current = withStars;
-      setProfile(withStars);
+      const festival = parseEventId(puzzle.id),
+        badged = festival ? awardBadge(withStars, festival.key) : withStars;
+      commit(badged, "undo:milestone");
+      if (badged !== withStars)
+        setNotice("Weekend champion! You cleared all 10 festival boards.");
       if (earned.gained)
         setNotice(
           `+${earned.gained} undos (${earned.profile.undos}/${MAX_UNDOS}) for clearing ten more gardens.`,
@@ -744,10 +791,7 @@ function App() {
       void db.meta
         .get("syncEnabled")
         .then((flag) => {
-          if (flag?.value === true)
-            return flushCompletions().then((items) =>
-              setProfile((p) => mergeProgress(p, items)),
-            );
+          if (flag?.value === true) syncProgress();
         })
         .catch(() => {
           /* Local progress and outbox remain intact for retry. */
@@ -755,7 +799,7 @@ function App() {
     };
     window.addEventListener("online", online);
     return () => window.removeEventListener("online", online);
-  }, []);
+  }, [syncProgress]);
   function setMusic(volume: number) {
     setAmbient(volume);
     setSettings({ ...settings, music: volume });
@@ -824,10 +868,7 @@ function App() {
           bonus: !!next.lastAward?.labels.some((l) => l.endsWith("BONUS")),
           combo: next.combo,
         });
-        if (tracked !== profileRef.current) {
-          profileRef.current = tracked;
-          setProfile(tracked);
-        }
+        if (tracked !== profileRef.current) commit(tracked, "pair");
         if (!settings.reducedMotion) {
           setAnimating(true);
           setTimeout(() => setAnimating(false), 180);
@@ -962,6 +1003,31 @@ function App() {
     );
   };
   /** Starts campaign or endless level `n` (endless boards are generated). */
+  /** Shares the result with the system share sheet, or copies it. */
+  const shareWin = async () => {
+    const where = festivalBoard
+        ? `festival board ${festivalBoard.board}`
+        : level
+          ? `level ${level.number} (${level.name})`
+          : "today's daily puzzle",
+      text = `I cleared ${where} on Zen Tiles in ${formatTime(s.elapsedMs)} with ${s.score.toLocaleString()} points!`;
+    try {
+      if (navigator.share) await navigator.share({ title: "Zen Tiles", text, url: location.origin });
+      else {
+        await navigator.clipboard.writeText(`${text} ${location.origin}`);
+        setNotice("Result copied — paste it anywhere to share.");
+      }
+    } catch {
+      /* The share sheet was dismissed. */
+    }
+  };
+  const startFestival = (key: string, board: number) => {
+    try {
+      start(eventPuzzle(key, board));
+    } catch {
+      setNotice("This festival board couldn't be grown. Try again.");
+    }
+  };
   const startLevel = (n: number) => {
     if (!isEndless(n)) return start(levels[n - 1].puzzle);
     setScreen("game");
@@ -981,8 +1047,7 @@ function App() {
       return;
     const next = spendUndo(profileRef.current);
     usedUndo.current = true;
-    profileRef.current = next;
-    setProfile(next);
+    commit(next, "undo:spend");
     setOnline(null);
     setHint(null);
     play("undo");
@@ -998,8 +1063,7 @@ function App() {
       next = applyAction(state, { type } as Parameters<typeof applyAction>[1]),
       paid = spendPowerUp(profileRef.current, kind);
     if (next === state || !paid) return;
-    profileRef.current = paid;
-    setProfile(paid);
+    commit(paid, `powerup:${kind}`);
     current.current = next;
     set(next);
     setOnline(null);
@@ -1070,15 +1134,18 @@ function App() {
       [customTiles, slots],
     ),
     tagKey = s.tiles.map((t) => t.tag ?? "").join(),
+    festivalBoard = parseEventId(puzzle.id),
+    // A board keeps its own week's pack, even after the weekend ends.
+    festivalPack = festivalBoard ? packForWeek(festivalBoard.key) : null,
     faces = useMemo(
       () =>
         facesFor(
           s.tiles,
           puzzle.id,
           level?.number ?? null,
-          myFaces,
+          festivalPack ? [...myFaces, ...festivalPack.faces] : myFaces,
         ),
-      [puzzle.id, level, tagKey, myFaces],
+      [puzzle.id, level, tagKey, myFaces, festivalPack],
     ),
     newPacks =
       level && s.status === "won"
@@ -1238,13 +1305,18 @@ function App() {
           <span className="eyebrow">
             {puzzle.id.startsWith("daily-")
               ? "DAILY · UTC"
-              : chapterLook
+              : festivalBoard
+                ? `WEEKEND FESTIVAL · BOARD ${festivalBoard.board}/${EVENT_BOARDS}`
+                : chapterLook
                 ? `LEVEL ${level?.number} · ${chapterLook.name.toUpperCase()}`
                 : `LEVEL ${level?.number ?? 1}`}
             <span>•</span>
             {puzzle.difficulty.toUpperCase()}
           </span>
-          <h1>{level?.name ?? "Daily garden"}</h1>
+          <h1>
+            {level?.name ??
+              (festivalPack ? `${festivalPack.name} festival` : "Daily garden")}
+          </h1>
         </button>
         <div className="top-actions">
           {offline && (
@@ -1585,7 +1657,18 @@ function App() {
                   </div>
                 ))}
                 <div className="row">
+                  <button onClick={() => void shareWin()}>Share</button>
                   <button onClick={() => start(puzzle)}>Play again</button>
+                  {festivalBoard && festivalBoard.board < EVENT_BOARDS && (
+                    <button
+                      className="primary"
+                      onClick={() =>
+                        startFestival(festivalBoard.key, festivalBoard.board + 1)
+                      }
+                    >
+                      Next festival board
+                    </button>
+                  )}
                   {level && canPlay(level.number + 1) && (
                     <button
                       className="primary"
@@ -2237,6 +2320,18 @@ function App() {
                       );
                     })}
                   </ul>
+                  {!!profile.badges?.length && (
+                    <>
+                      <h3>Badges</h3>
+                      <ul className="badges">
+                        {profile.badges.map((b) => (
+                          <li key={b}>
+                            🏅 Weekend champion · {b.replace("weekend:", "")}
+                          </li>
+                        ))}
+                      </ul>
+                    </>
+                  )}
                   <h3>Achievements</h3>
                   <ul className="achievements">
                     {(
@@ -2314,7 +2409,11 @@ function App() {
                             !owned && balance(profile) < themePrices[theme]
                           }
                           onClick={() => {
-                            if (!owned) setProfile(buyTheme(profile, theme));
+                            if (!owned)
+                              commit(
+                                buyTheme(profileRef.current, theme),
+                                `theme:${theme}`,
+                              );
                             change("theme", theme);
                           }}
                         >
@@ -2441,6 +2540,54 @@ function App() {
               )}
               {screen === "today" && (
                 <>
+                  {(() => {
+                    const ev = weekendEvent();
+                    if (!ev)
+                      return (
+                        <p className="festival-off">
+                          🎪 The weekend festival opens on Friday
+                          {daysUntilFestival() === 1 ? " (tomorrow)" : ` (in ${daysUntilFestival()} days)`}.
+                        </p>
+                      );
+                    const cleared = eventCleared(profile, ev.key),
+                      champion = profile.badges?.includes(`weekend:${ev.key}`);
+                    return (
+                      <section className="festival">
+                        <h3>
+                          🎪 Weekend festival · {ev.pack.name}
+                        </h3>
+                        <p className="muted">
+                          10 boards full of {ev.pack.name} tiles, until{" "}
+                          {ev.endsOn}. Clear them all for the Weekend champion
+                          badge.
+                        </p>
+                        <div className="bar" aria-label={`${cleared} of ${EVENT_BOARDS} cleared`}>
+                          <span style={{ width: `${(cleared / EVENT_BOARDS) * 100}%` }} />
+                        </div>
+                        <div className="festival-boards">
+                          {Array.from({ length: EVENT_BOARDS }, (_, i) => {
+                            const n = i + 1,
+                              done = eventPuzzleId(ev.key, n) in profile.completed,
+                              open = eventBoardOpen(profile, ev.key, n);
+                            return (
+                              <button
+                                key={n}
+                                className={done ? "done" : ""}
+                                disabled={!open}
+                                aria-label={`Festival board ${n}${done ? " (cleared)" : open ? "" : " (locked)"}`}
+                                onClick={() => startFestival(ev.key, n)}
+                              >
+                                {done ? "✓" : open ? n : "🔒"}
+                              </button>
+                            );
+                          })}
+                        </div>
+                        {champion && (
+                          <p className="unlock-chip">🏅 Weekend champion</p>
+                        )}
+                      </section>
+                    );
+                  })()}
                   <h3>Daily gift</h3>
                   <p className="muted">
                     Come back each day for the next gift. Day 7 is the
@@ -2473,8 +2620,7 @@ function App() {
                     onClick={() => {
                       const next = claimLogin(profileRef.current, today);
                       if (next === profileRef.current) return;
-                      profileRef.current = next;
-                      setProfile(next);
+                      commit(next, "gift");
                       play("bonus");
                       setNotice(
                         `Daily gift: ${rewardText(LOGIN_REWARDS[next.login!.day - 1])}.`,
@@ -2517,8 +2663,7 @@ function App() {
                       onClick={() => {
                         const opened = openChest(profileRef.current);
                         if (!opened) return;
-                        profileRef.current = opened.profile;
-                        setProfile(opened.profile);
+                        commit(opened.profile, "chest");
                         play("perfect");
                         setNotice(`Chest opened: ${rewardLabel(opened.reward)}!`);
                       }}
@@ -2571,8 +2716,7 @@ function App() {
                             onClick={() => {
                               const next = claimMission(profileRef.current, m.id, today);
                               if (next === profileRef.current) return;
-                              profileRef.current = next;
-                              setProfile(next);
+                              commit(next, `mission:${m.id}`);
                               play("bonus");
                             }}
                           >

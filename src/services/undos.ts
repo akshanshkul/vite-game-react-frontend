@@ -2,6 +2,7 @@
 // cleared (campaign or endless, not dailies) pays 3 more, never above 20.
 // Kept free of IndexedDB so the rules can be unit tested.
 import type { Profile } from "./storage";
+import { hasClaim, withClaim } from "./claims";
 export const START_UNDOS = 7;
 export const MAX_UNDOS = 20;
 export const UNDOS_PER_MILESTONE = 3;
@@ -15,12 +16,20 @@ export const levelsCleared = (p: Pick<Profile, "completed">) =>
  * spent even when the cap swallows it, so nothing is banked past 20.
  */
 export function earnUndos(p: Profile): { profile: Profile; gained: number } {
-  const reached = Math.floor(levelsCleared(p) / LEVELS_PER_MILESTONE),
-    due = reached - p.undoMilestones;
-  if (due <= 0) return { profile: p, gained: 0 };
+  const reached = Math.floor(levelsCleared(p) / LEVELS_PER_MILESTONE);
+  if (reached <= p.undoMilestones) return { profile: p, gained: 0 };
+  // Each milestone pays once per account: one already claimed on another
+  // device (its key synced here) pays nothing again.
+  let next = p,
+    due = 0;
+  for (let k = p.undoMilestones + 1; k <= reached; k++) {
+    const key = `undomilestone:${k}`;
+    if (!hasClaim(next, key)) due++;
+    next = withClaim(next, key);
+  }
   const undos = Math.min(MAX_UNDOS, p.undos + due * UNDOS_PER_MILESTONE);
   return {
-    profile: { ...p, undos, undoMilestones: reached },
+    profile: { ...next, undos, undoMilestones: reached },
     gained: undos - p.undos,
   };
 }

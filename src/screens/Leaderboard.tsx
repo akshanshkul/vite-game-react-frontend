@@ -179,6 +179,124 @@ function Runs() {
     </>
   );
 }
+type FriendRow = Standing & { code: string | null };
+/** Friends: my code to share, add by code, and a board of me + friends. */
+function Friends({
+  signedIn,
+  onSignIn,
+}: {
+  signedIn: boolean;
+  onSignIn: () => void;
+}) {
+  const [data, setData] = useState<{ code: string; items: FriendRow[] } | null>(null),
+    [draft, setDraft] = useState(""),
+    [message, setMessage] = useState(""),
+    [busy, setBusy] = useState(false);
+  const run = async (fn: () => Promise<{ code: string; items: FriendRow[] }>) => {
+    setBusy(true);
+    setMessage("");
+    try {
+      setData(await fn());
+    } catch (e) {
+      setMessage(e instanceof Error ? e.message : "Friends are unavailable right now.");
+    } finally {
+      setBusy(false);
+    }
+  };
+  useEffect(() => {
+    if (signedIn) void run(() => request("friends"));
+  }, [signedIn]);
+  if (!signedIn)
+    return (
+      <div className="rank-cta">
+        <p>Sign in to get your friend code and compare progress with friends.</p>
+        <button className="primary" onClick={onSignIn}>
+          Sign in
+        </button>
+      </div>
+    );
+  if (!data)
+    return message ? <p className="muted">{message}</p> : <div className="spinner center" />;
+  const share = async () => {
+    const text = `Add me on Zen Tiles! My friend code: ${data.code}`;
+    try {
+      if (navigator.share) await navigator.share({ text, url: location.origin });
+      else {
+        await navigator.clipboard.writeText(data.code);
+        setMessage("Code copied.");
+      }
+    } catch {
+      /* Share sheet dismissed. */
+    }
+  };
+  return (
+    <>
+      <div className="friend-code">
+        <span>Your friend code</span>
+        <strong>{data.code}</strong>
+        <button onClick={() => void share()}>Share</button>
+      </div>
+      <form
+        className="friend-add"
+        onSubmit={(e) => {
+          e.preventDefault();
+          const code = draft.trim().toUpperCase();
+          if (!/^[A-Z2-9]{6}$/.test(code))
+            return setMessage("Friend codes are 6 letters and numbers.");
+          void run(() => request("friends", { code })).then(() => setDraft(""));
+        }}
+      >
+        <input
+          value={draft}
+          maxLength={6}
+          autoCapitalize="characters"
+          placeholder="Friend's code"
+          aria-label="Friend's code"
+          onChange={(e) => setDraft(e.target.value)}
+        />
+        <button className="primary" disabled={busy || !draft.trim()}>
+          Add
+        </button>
+      </form>
+      {message && <p className="form-note" role="status">{message}</p>}
+      <ol className="ranks">
+        {data.items.map((f) => (
+          <li
+            key={f.code ?? f.displayName}
+            className={`rank-row ${f.isMe ? "me" : ""} ${f.rank <= 3 ? "top" : ""}`}
+          >
+            <span className="rank-badge">{medal(f.rank)}</span>
+            <span className="rank-name">
+              {f.displayName}
+              {f.isMe && <em> · you</em>}
+            </span>
+            <span className="rank-stats">
+              <b>{f.levels}</b> {f.levels === 1 ? "level" : "levels"} · <b>{f.stars}</b>★
+              {!f.isMe && f.code && (
+                <button
+                  className="link-button"
+                  disabled={busy}
+                  aria-label={`Remove ${f.displayName}`}
+                  onClick={() => {
+                    if (confirm(`Remove ${f.displayName} from your friends?`))
+                      void run(() => request(`friends/${f.code}`, {}, "DELETE"));
+                  }}
+                >
+                  ✕
+                </button>
+              )}
+            </span>
+          </li>
+        ))}
+      </ol>
+      {data.items.length < 2 && (
+        <p className="muted">
+          Share your code, or add a friend's, to see how you compare.
+        </p>
+      )}
+    </>
+  );
+}
 export default function Leaderboard({
   signedIn,
   onSignIn,
@@ -186,13 +304,14 @@ export default function Leaderboard({
   signedIn: boolean;
   onSignIn: () => void;
 }) {
-  const [tab, setTab] = useState<"players" | "runs">("players");
+  const [tab, setTab] = useState<"players" | "friends" | "runs">("players");
   return (
     <section className="leaderboard">
       <div className="segmented" role="tablist" aria-label="Ranking type">
         {(
           [
             ["players", "Players"],
+            ["friends", "Friends"],
             ["runs", "Verified runs"],
           ] as const
         ).map(([key, label]) => (
@@ -210,6 +329,8 @@ export default function Leaderboard({
       </div>
       {tab === "players" ? (
         <Players signedIn={signedIn} onSignIn={onSignIn} />
+      ) : tab === "friends" ? (
+        <Friends signedIn={signedIn} onSignIn={onSignIn} />
       ) : (
         <Runs />
       )}

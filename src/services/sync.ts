@@ -70,6 +70,7 @@ async function profileCompletions(): Promise<Completion[]> {
     ];
   });
 }
+const SYNC_BATCH = 50;
 export async function flushCompletions(): Promise<Progress[]> {
   const { user } = await api.me(),
     cacheKey = `syncedEvents:${user.id}`;
@@ -86,10 +87,12 @@ export async function flushCompletions(): Promise<Progress[]> {
     ];
   if (!events.length) return (await api.progress()).items;
   let items: Progress[] = [];
-  for (let i = 0; i < events.length; i += 100) {
+  // Moderate batches keep each request well inside PHP's 30 s limit over a
+  // slow remote database.
+  for (let i = 0; i < events.length; i += SYNC_BATCH) {
     const result = await request<{ acknowledged: string[]; items: Progress[] }>(
       "progress/sync",
-      { events: events.slice(i, i + 100) },
+      { events: events.slice(i, i + SYNC_BATCH) },
     );
     await db.outbox.bulkDelete(result.acknowledged);
     for (const id of result.acknowledged) if (id.startsWith("p:")) sent.add(id);

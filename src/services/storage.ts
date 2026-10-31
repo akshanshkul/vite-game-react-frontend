@@ -46,6 +46,10 @@ export type Profile = {
   chestStars?: number;
   chests?: number;
   chestsOpened?: number;
+  /** One-time claim keys already used (synced as a set across devices). */
+  claims?: string[];
+  /** Cosmetic badges, e.g. "weekend:2026-W44" for a finished festival. */
+  badges?: string[];
   /** Power-ups owned. */
   powerUps?: Partial<Record<import("./chests").PowerUp, number>>;
 };

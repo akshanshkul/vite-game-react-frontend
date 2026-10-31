@@ -2393,3 +2393,108 @@ iframe{
   margin: 6px 0;
   padding-left: 20px;
 }
+
+/* ---------- Friends ---------- */
+.friend-code {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 2px 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--accent-soft);
+}
+.friend-code span {
+  font-size: 11px;
+  color: var(--muted);
+}
+.friend-code strong {
+  grid-row: 2;
+  font-size: 22px;
+  letter-spacing: 3px;
+  font-variant-numeric: tabular-nums;
+}
+.friend-code button {
+  grid-row: span 2;
+}
+.friend-add {
+  display: flex;
+  gap: 8px;
+  margin: 10px 0;
+}
+.friend-add input {
+  flex: 1;
+  text-transform: uppercase;
+  letter-spacing: 2px;
+}
+.rank-stats .link-button {
+  margin-left: 6px;
+  padding: 0 4px;
+  color: var(--muted);
+}
+
+/* ---------- Weekend festival ---------- */
+.festival {
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: linear-gradient(135deg, #fde7f3, var(--surface));
+  border: 1px solid var(--line);
+}
+.festival h3 {
+  margin: 0 0 4px;
+}
+.festival .bar {
+  height: 6px;
+  margin: 8px 0;
+  border-radius: 999px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+.festival .bar span {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, #ec4899, #f59e0b);
+}
+.festival-boards {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 6px;
+}
+.festival-boards button {
+  min-height: 40px;
+  padding: 0;
+  border-radius: 10px;
+  font-weight: 700;
+}
+.festival-boards button.done {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.festival-off {
+  padding: 8px 12px;
+  border-radius: 12px;
+  background: var(--surface-2);
+  font-size: 13px;
+}
+.badges {
+  list-style: none;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+.badges li {
+  padding: 8px 12px;
+  border-radius: 12px;
+  background: var(--accent-soft);
+  font-weight: 600;
+}
+.leaderboard .segmented {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+}
+.leaderboard .segmented button {
+  padding-left: 4px;
+  padding-right: 4px;
+  font-size: 13px;
+  white-space: nowrap;
+}
