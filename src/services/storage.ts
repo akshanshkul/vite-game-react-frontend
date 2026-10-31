@@ -9,16 +9,6 @@ export type Settings = {
   sound: number;
   music: number;
   haptics: boolean;
-  /** Share of pairs dealt as timed bonus pairs (0–0.3). */
-  bonusFrequency: number;
-  bonusSeconds: number;
-  multipliers: "gentle" | "standard" | "big";
-  /** Late-level shares of programming and animal faces. */
-  programmingShare: number;
-  animalShare: number;
-  comboRewards: boolean;
-  /** Unlock levels and tile packs one by one. */
-  progression: boolean;
   timer: boolean;
   large: boolean;
   contrast: boolean;
@@ -40,6 +30,12 @@ export type Profile = {
   completed: Record<string, { score: number; time: number; stars: number }>;
   dailyDates: string[];
   purchases: string[];
+  /** Coins spent in the shop. Older profiles predate it and paid 100 each. */
+  spent?: number;
+  /** Undos left (see services/undos.ts for how they are earned). */
+  undos: number;
+  /** 10-level milestones already paid out in undos. */
+  undoMilestones: number;
 };
 export type Save = {
   id: string;
@@ -63,13 +59,6 @@ export const defaultSettings: Settings = {
   sound: 0.7,
   music: 0,
   haptics: true,
-  bonusFrequency: 0.1,
-  bonusSeconds: 15,
-  multipliers: "standard",
-  programmingShare: 0.25,
-  animalShare: 0.2,
-  comboRewards: true,
-  progression: true,
   timer: true,
   large: false,
   contrast: false,
@@ -85,6 +74,8 @@ export const defaultProfile: Profile = {
   completed: {},
   dailyDates: [],
   purchases: [],
+  undos: 7,
+  undoMilestones: 0,
 };
 export function validState(value: unknown): value is State {
   if (!value || typeof value !== "object") return false;
@@ -178,8 +169,29 @@ export function complete(profile: Profile, id: string, s: State): Profile {
       : profile.dailyDates,
   };
 }
+/** Each theme costs more than the one before it (25 coins per garden won). */
+export const themePrices: Record<Settings["theme"], number> = {
+  jade: 0,
+  night: 100,
+  sand: 175,
+  ocean: 275,
+  sakura: 400,
+  ember: 550,
+  midnight: 725,
+  slate: 925,
+};
 export const balance = (p: Profile) =>
-  Object.keys(p.completed).length * 25 - p.purchases.length * 100;
+  Object.keys(p.completed).length * 25 - (p.spent ?? p.purchases.length * 100);
+/** Buys a theme if affordable; returns the profile unchanged otherwise. */
+export function buyTheme(p: Profile, theme: Settings["theme"]): Profile {
+  const price = themePrices[theme];
+  if (p.purchases.includes(theme) || balance(p) < price) return p;
+  return {
+    ...p,
+    purchases: [...p.purchases, theme],
+    spent: (p.spent ?? p.purchases.length * 100) + price,
+  };
+}
 export function streak(
   dates: string[],
   today = new Date().toISOString().slice(0, 10),

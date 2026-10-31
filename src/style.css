@@ -324,17 +324,11 @@ h3 {
 .canvas {
   position: absolute;
   inset: 0;
-  touch-action: manipulation;
+  /* Taps, holds and drags on tiles belong to the game, not page scrolling. */
+  touch-action: none;
 }
 .canvas canvas {
   display: block !important;
-}
-.canvas.large {
-  min-width: 700px;
-  min-height: 460px;
-}
-.table:has(.large) {
-  overflow: auto;
 }
 .board-loading {
   position: absolute;
@@ -2041,4 +2035,113 @@ details.danger summary {
 
 iframe{
   display: none;
+}
+/* ---------- Endless gardens & my tiles ---------- */
+.growing {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 12px;
+  color: var(--ink);
+  font-weight: 600;
+  background: #06180f99;
+  animation: fade-in 0.25s;
+}
+.band.endless .levels button:not(.locked) {
+  border-left: 5px solid var(--chip, var(--primary));
+}
+.pager {
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 10px;
+}
+.my-tiles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 8px 0;
+}
+.my-tile {
+  position: relative;
+  padding: 4px;
+  border-radius: 12px;
+  background: var(--surface-2);
+}
+.my-tile.idle {
+  opacity: 0.45;
+}
+.my-tile .icon-btn {
+  position: absolute;
+  top: -8px;
+  right: -8px;
+  width: 24px;
+  height: 24px;
+}
+.tile-maker {
+  display: grid;
+  gap: 8px;
+  margin: 8px 0;
+}
+.tile-maker input:not([type="file"]) {
+  font-size: 22px;
+  width: 4.5em;
+  text-align: center;
+}
+.photo-pick {
+  position: relative;
+  cursor: pointer;
+  padding: 11px 14px;
+  border-radius: 12px;
+  border: 1px dashed var(--line);
+  background: var(--surface);
+}
+.photo-pick input[type="file"] {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+/* ---------- Compact action buttons (phones) ---------- */
+.toolbar button {
+  gap: 2px;
+  font-size: 9px;
+  letter-spacing: 0.2px;
+}
+.tool-icon {
+  width: 34px;
+  height: 34px;
+  box-shadow:
+    0 2px 0 #b9ae8a,
+    0 4px 8px #00000035;
+}
+.tool-icon svg {
+  width: 15px;
+  height: 15px;
+}
+.toolbar button:active:not(:disabled) .tool-icon {
+  transform: translateY(2px);
+  box-shadow:
+    0 0 0 #b9ae8a,
+    0 2px 4px #00000035;
+}
+.badge {
+  min-width: 15px;
+  height: 15px;
+  font-size: 9px;
+  line-height: 15px;
+  top: -3px;
+  right: -3px;
+}
+@media (min-width: 760px) {
+  .tool-icon {
+    width: 40px;
+    height: 40px;
+  }
+}
+.badge.empty {
+  background: #8a8f86;
 }

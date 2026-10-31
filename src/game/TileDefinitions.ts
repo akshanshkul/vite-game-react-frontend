@@ -33,12 +33,30 @@ import {
   siTypescript,
   siVuedotjs,
 } from "simple-icons";
-export type Category = "traditional" | "programming" | "animal";
+import {
+  iconSymbols,
+  indiaSymbols,
+  socialSymbols,
+  type SymbolDef,
+  type SymbolPart,
+} from "./symbols";
+export type Category =
+  | "traditional"
+  | "programming"
+  | "animal"
+  | "fruit"
+  | "icon"
+  | "social"
+  | "india";
 export type Face =
   | { kind: "classic"; suit: string; glyph: string }
   | { kind: "emoji"; char: string; name: string }
   /** Brand logo from Simple Icons (CC0): 24×24 SVG path + brand colour. */
-  | { kind: "logo"; title: string; path: string; hex: string };
+  | { kind: "logo"; title: string; path: string; hex: string }
+  /** A player's own photo (128 px JPEG data URL), stored on the device. */
+  | { kind: "photo"; id: string; src: string }
+  /** Hand-drawn flat symbol: coloured 24 × 24 path parts. */
+  | { kind: "symbol"; title: string; parts: SymbolPart[] };
 /**
  * One distinct glyph per traditional match group, so tiles never need a
  * number: the two tiles of a group share it and no two groups do.
@@ -74,7 +92,11 @@ export const faceKey = (f: Face) =>
     ? `c:${f.glyph}`
     : f.kind === "emoji"
       ? `e:${f.char}`
-      : `l:${f.title}`;
+      : f.kind === "logo"
+        ? `l:${f.title}`
+        : f.kind === "symbol"
+          ? `s:${f.title}`
+          : `p:${f.id}`;
 /** The traditional face for a match group. */
 export const classicFace = (matchGroup: string, suit: string): Face => ({
   kind: "classic",
@@ -82,12 +104,21 @@ export const classicFace = (matchGroup: string, suit: string): Face => ({
   glyph: glyphs[matchGroup] ?? "?",
 });
 export const faceName = (f: Face) =>
-  f.kind === "classic" ? f.suit : f.kind === "emoji" ? f.name : f.title;
+  f.kind === "classic"
+    ? f.suit
+    : f.kind === "emoji"
+      ? f.name
+      : f.kind === "logo" || f.kind === "symbol"
+        ? f.title
+        : "My photo";
+/** "🍏:Green apple 🍐:Pear" → faces; names may contain spaces. */
 const animals = (list: string): Face[] =>
-  list.split(" ").map((pair) => {
+  list.split(/\s+(?=\S+:)/).map((pair) => {
     const [char, name] = pair.split(":");
     return { kind: "emoji", char, name };
   });
+const drawn = (defs: SymbolDef[]): Face[] =>
+  defs.map(({ title, parts }) => ({ kind: "symbol", title, parts }));
 const logos = (...icons: { title: string; path: string; hex: string }[]): Face[] =>
   icons.map(({ title, path, hex }) => ({ kind: "logo", title, path, hex }));
 export type Pack = {
@@ -175,6 +206,27 @@ export const packs: Pack[] = [
     faces: animals(
       "🐻:Bear 🐨:Koala 🦔:Hedgehog 🐿️:Chipmunk 🦝:Raccoon 🐺:Wolf 🦇:Bat 🐸:Frog 🐝:Bee",
     ),
+  },
+  {
+    name: "Fruits",
+    category: "fruit",
+    after: 60,
+    faces: animals(
+      "🍎:Apple 🍏:Green apple 🍐:Pear 🍊:Orange 🍋:Lemon 🍌:Banana 🍉:Watermelon 🍇:Grapes 🍓:Strawberry 🫐:Blueberries 🍈:Melon 🍒:Cherries 🍑:Peach 🥭:Mango 🍍:Pineapple 🥥:Coconut 🥝:Kiwi 🍅:Tomato 🫒:Olive",
+    ),
+  },
+  { name: "Icons", category: "icon", after: 75, faces: drawn(iconSymbols) },
+  { name: "Social", category: "social", after: 90, faces: drawn(socialSymbols) },
+  {
+    name: "India",
+    category: "india",
+    after: 100,
+    faces: [
+      ...animals(
+        "🕌:Taj Mahal 🛕:Temple ☕:Chai 🏏:Cricket 🪔:Diya 🪁:Kite 🛺:Auto-rickshaw 🐅:Tiger 🪘:Tabla 🍛:Curry 🥻:Sari 🎇:Diwali",
+      ),
+      ...drawn(indiaSymbols),
+    ],
   },
 ];
 /** Packs open on a level: everything with `after` below it (null = all). */

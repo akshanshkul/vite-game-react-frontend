@@ -34,7 +34,8 @@ function Row({ s }: { s: Standing }) {
         {s.isMe && <em> · you</em>}
       </span>
       <span className="rank-stats">
-        <b>{s.levels}</b> levels · <b>{s.stars}</b>★
+        <b>{s.levels}</b> {s.levels === 1 ? "level" : "levels"} ·{" "}
+        <b>{s.stars}</b>★
       </span>
     </li>
   );

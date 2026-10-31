@@ -1,6 +1,27 @@
 // TileRenderer: paints a premium ivory tile (shadow, body, bevelled face and
 // picture) once into a canvas; the board caches it as a texture per face.
 import { colors, emojiFont, type Face } from "./TileDefinitions";
+/** Loaded player photos by tile id. */
+const photos = new Map<string, HTMLImageElement>();
+export const isPhotoReady = (id: string) => photos.has(id);
+/**
+ * Loads a photo tile in the background. Uses onload (img.decode() can stay
+ * pending in a hidden tab); boards draw a placeholder until the
+ * "tile-photo-ready" event, then redraw. Never blocks startup.
+ */
+export function preloadPhoto(id: string, src: string): Promise<void> {
+  if (photos.get(id)?.src === src) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      photos.set(id, img);
+      window.dispatchEvent(new Event("tile-photo-ready"));
+      resolve();
+    };
+    img.onerror = () => reject(Error("This photo could not be shown."));
+    img.src = src;
+  });
+}
 export type Look = "free" | "blocked" | "selected";
 const palette: Record<Look, { top: string; bottom: string; side: [string, string]; rim: string }> = {
   free: { top: "#fffef8", bottom: "#f1e8cf", side: ["#ddd2ad", "#b9ab82"], rim: "#00000022" },
@@ -79,6 +100,32 @@ export function paintTile(
   if (face.kind === "emoji") {
     ctx.font = `${Math.round(fh * 0.52)}px ${emojiFont}`;
     ctx.fillText(face.char, cx, cy + fh * 0.03);
+  } else if (face.kind === "photo") {
+    const img = photos.get(face.id),
+      size = Math.min(w * 0.78, fh * 0.78),
+      left = cx - size / 2,
+      top = cy - size / 2;
+    rounded(ctx, left, top, size, size, size * 0.16);
+    ctx.save();
+    ctx.clip();
+    if (img) ctx.drawImage(img, left, top, size, size);
+    else {
+      ctx.fillStyle = "#d9d2b8";
+      ctx.fillRect(left, top, size, size);
+    }
+    ctx.restore();
+    rounded(ctx, left, top, size, size, size * 0.16);
+    ctx.lineWidth = Math.max(1, w * 0.02);
+    ctx.strokeStyle = "#00000030";
+    ctx.stroke();
+  } else if (face.kind === "symbol") {
+    const size = w * 0.66;
+    ctx.translate(cx - size / 2, cy - size / 2);
+    ctx.scale(size / 24, size / 24);
+    for (const part of face.parts) {
+      ctx.fillStyle = part.fill;
+      ctx.fill(new Path2D(part.d), part.evenodd ? "evenodd" : "nonzero");
+    }
   } else if (face.kind === "logo") {
     const size = w * 0.58,
       s = size / 24;

@@ -24,12 +24,46 @@ import {
   type Puzzle,
   type Pair,
 } from "../packages/engine/src/index";
-import { levels, daily, unlocked } from "./services/content";
+import {
+  levels,
+  daily,
+  isUnlocked,
+  levelNumberOf,
+  levelName,
+  isEndless,
+  highestCleared,
+  endlessCleared,
+  endlessUnlockedUpTo,
+  nextBatchIn,
+  nextPlayable,
+  chapterOf,
+  chapterTheme,
+  customTileSlots,
+  nextCustomSlotAt,
+  CAMPAIGN_SIZE,
+  ENDLESS_BATCH,
+} from "./services/content";
+import {
+  earnUndos,
+  migrateUndos,
+  spendUndo,
+  MAX_UNDOS,
+} from "./services/undos";
+import {
+  customFace,
+  loadCustomTiles,
+  photoToDataUrl,
+  saveCustomTiles,
+  validEmoji,
+  type CustomTile,
+} from "./services/customTiles";
 import {
   db,
   validState,
   complete,
   balance,
+  buyTheme,
+  themePrices,
   streak,
   defaultProfile,
   type Profile,
@@ -50,7 +84,7 @@ import {
   type Face,
 } from "./game/TileDefinitions";
 import { dealBoard, facesFor } from "./game/TileGenerator";
-import { paintTile } from "./game/TileRenderer";
+import { isPhotoReady, paintTile, preloadPhoto } from "./game/TileRenderer";
 import "./style.css";
 const Leaderboard = lazy(() => import("./screens/Leaderboard"));
 const Account = lazy(() => import("./screens/Account"));
@@ -124,6 +158,38 @@ function FlyingTile({
     </div>
   );
 }
+const endlessCache = new Map<number, Promise<Puzzle>>();
+/** Generates (once) and returns endless level `n`, off the UI thread. */
+function endlessPuzzle(n: number): Promise<Puzzle> {
+  let job = endlessCache.get(n);
+  if (!job) {
+    job = new Promise<Puzzle>((resolve, reject) => {
+      const w = new Worker(new URL("./game/endless.worker.ts", import.meta.url), {
+          type: "module",
+        }),
+        stop = (fn: () => void) => {
+          clearTimeout(timer);
+          w.terminate();
+          fn();
+        },
+        timer = setTimeout(
+          () => stop(() => reject(Error("Growing this garden took too long."))),
+          30000,
+        );
+      w.onmessage = (e) =>
+        stop(() =>
+          e.data.puzzle ? resolve(e.data.puzzle) : reject(Error(e.data.error)),
+        );
+      w.onerror = () =>
+        stop(() => reject(Error("The level generator is unavailable.")));
+      w.postMessage({ n });
+    });
+    job.catch(() => endlessCache.delete(n));
+    endlessCache.set(n, job);
+  }
+  return job;
+}
+const ENDLESS_PAGE = 30;
 type Screen =
   | "game"
   | "welcome"
@@ -167,7 +233,15 @@ function TileCanvas({
 }) {
   const ref = useRef<HTMLCanvasElement>(null),
     height = width * 1.17,
-    pad = Math.ceil(width * 0.12);
+    pad = Math.ceil(width * 0.12),
+    [photoTick, setPhotoTick] = useState(0);
+  // A photo tile still loading repaints once its picture arrives.
+  useEffect(() => {
+    if (face.kind !== "photo" || isPhotoReady(face.id)) return;
+    const ready = () => setPhotoTick((t) => t + 1);
+    window.addEventListener("tile-photo-ready", ready);
+    return () => window.removeEventListener("tile-photo-ready", ready);
+  }, [face]);
   useEffect(() => {
     const canvas = ref.current!,
       dpr = Math.min(devicePixelRatio || 1, 3),
@@ -176,7 +250,7 @@ function TileCanvas({
     canvas.height = Math.ceil((height + pad * 2) * dpr);
     ctx.scale(dpr, dpr);
     paintTile(ctx, face, "free", width, height, pad, badge);
-  }, [face, width, height, pad, badge]);
+  }, [face, width, height, pad, badge, photoTick]);
   return (
     <canvas
       ref={ref}
@@ -187,7 +261,7 @@ function TileCanvas({
 }
 function App() {
   const [s, set] = useState(() =>
-      dealBoard(levels[0].puzzle, 1, useSettings.getState().settings),
+      dealBoard(levels[0].puzzle, 1),
     ),
     [puzzle, setPuzzle] = useState<Puzzle>(levels[0].puzzle),
     [profile, setProfile] = useState<Profile>(defaultProfile),
@@ -205,8 +279,18 @@ function App() {
   const [online, setOnline] = useState<RunTicket | null>(null);
   const [moves, setMoves] = useState<[string, string][]>([]);
   const [user, setUser] = useState<User | null>(null);
+  const [customTiles, setCustomTiles] = useState<CustomTile[]>([]);
+  const [tileError, setTileError] = useState("");
+  const [emojiDraft, setEmojiDraft] = useState("");
+  /** First level shown in the endless grid page; null = page with next level. */
+  const [endlessPage, setEndlessPage] = useState<number | null>(null);
+  /** Endless level being generated, shown over the board meanwhile. */
+  const [growing, setGrowing] = useState<number | null>(null);
   const userRef = useRef(user);
   userRef.current = user;
+  /** Live profile for handlers that outlive a render (keyboard, win effect). */
+  const profileRef = useRef(profile);
+  profileRef.current = profile;
   /** Send finished levels to the account so they count in player rankings. */
   const syncProgress = useCallback(() => {
     void db.meta
@@ -306,24 +390,52 @@ function App() {
       db.meta.get("settings"),
       db.meta.get("tutorial"),
       db.meta.get("signedIn"),
+      loadCustomTiles()
+        .then((tiles) => {
+          // Photos load in the background; boards redraw when they arrive.
+          for (const t of tiles)
+            if (t.kind === "photo") preloadPhoto(t.id, t.value).catch(() => {});
+          return tiles;
+        })
+        .catch(() => [] as CustomTile[]),
     ])
-      .then(async ([saved, p, config, tutorial, signedIn]) => {
+      .then(async ([saved, p, config, tutorial, signedIn, mine]) => {
         if (!active) return;
+        setCustomTiles(mine);
         if (p?.value && typeof p.value === "object")
-          setProfile({ ...defaultProfile, ...p.value });
+          setProfile(
+            migrateUndos({
+              ...defaultProfile,
+              ...p.value,
+              undos: (p.value as Partial<Profile>).undos as number,
+              undoMilestones: (p.value as Partial<Profile>)
+                .undoMilestones as number,
+            }),
+          );
         if (config?.value && typeof config.value === "object")
-          setSettings({ ...settings, ...config.value });
+          setSettings({
+            ...settings,
+            ...Object.fromEntries(
+              Object.entries(config.value).filter(([k]) => k in settings),
+            ),
+          });
         if (saved) {
           let candidate: Puzzle | undefined;
           try {
+            const n =
+              typeof saved.puzzleId === "string"
+                ? levelNumberOf(saved.puzzleId)
+                : null;
             candidate =
-              levels.find((l) => l.puzzle.id === saved.puzzleId)?.puzzle ??
-              (typeof saved.puzzleId === "string" &&
-              /^daily-\d{4}-\d{2}-\d{2}$/.test(saved.puzzleId)
-                ? daily(saved.puzzleId.slice(6))
-                : undefined);
+              n !== null && isEndless(n)
+                ? await endlessPuzzle(n)
+                : (levels.find((l) => l.puzzle.id === saved.puzzleId)?.puzzle ??
+                  (typeof saved.puzzleId === "string" &&
+                  /^daily-\d{4}-\d{2}-\d{2}$/.test(saved.puzzleId)
+                    ? daily(saved.puzzleId.slice(6))
+                    : undefined));
           } catch {
-            /* Preserve unknown daily versions. */
+            /* Preserve unknown daily versions and failed generations. */
           }
           if (
             candidate &&
@@ -403,9 +515,6 @@ function App() {
       "reduce-motion",
       settings.reducedMotion,
     );
-    document
-      .querySelector('meta[name="theme-color"]')
-      ?.setAttribute("content", themeColors[settings.theme]);
   }, [settings, loaded]);
   useEffect(() => {
     if (
@@ -438,7 +547,13 @@ function App() {
   useEffect(() => {
     if (s.status === "won" && loaded) {
       cue("win");
-      setProfile((p) => complete(p, puzzle.id, s));
+      const earned = earnUndos(complete(profileRef.current, puzzle.id, s));
+      profileRef.current = earned.profile;
+      setProfile(earned.profile);
+      if (earned.gained)
+        setNotice(
+          `+${earned.gained} undos (${earned.profile.undos}/${MAX_UNDOS}) for clearing ten more gardens.`,
+        );
       if (online && s.shuffles === 0) {
         void request<{ score: number; verified: boolean }>(
           `runs/${online.runId}/complete`,
@@ -450,7 +565,8 @@ function App() {
           )
           .catch((e) => setNotice(String(e)));
       }
-      db.outbox
+      if (!puzzle.id.startsWith("endless-"))
+        db.outbox
         .put({
           id: `completion-${attemptId}`,
           type: "completion",
@@ -753,22 +869,42 @@ function App() {
     setBusy(false);
     clearFlights();
     setPuzzle(p);
-    set(
-      dealBoard(
-        p,
-        levels.find((l) => l.puzzle.id === p.id)?.number ?? null,
-        settings,
-      ),
-    );
+    set(dealBoard(p, levelNumberOf(p.id)));
     setScreen("game");
-    setNotice("A fresh garden. Take your time.");
+    setNotice(
+      p.id.startsWith("endless-")
+        ? "A freshly grown garden. Generated levels are casual play."
+        : "A fresh garden. Take your time.",
+    );
+  };
+  /** Starts campaign or endless level `n` (endless boards are generated). */
+  const startLevel = (n: number) => {
+    if (!isEndless(n)) return start(levels[n - 1].puzzle);
+    setScreen("game");
+    setGrowing(n);
+    endlessPuzzle(n)
+      .then(start)
+      .catch((e) => setNotice(e instanceof Error ? e.message : String(e)))
+      .finally(() => setGrowing(null));
   };
   const doUndo = () => {
+    const state = current.current;
+    if (
+      !state.history.length ||
+      state.status === "paused" ||
+      profileRef.current.undos <= 0
+    )
+      return;
+    const next = spendUndo(profileRef.current);
+    profileRef.current = next;
+    setProfile(next);
     setOnline(null);
     setHint(null);
     play("undo");
     clearFlights();
     set((v) => undo(v));
+    if (next.undos === 0)
+      setNotice("That was your last undo. Clear ten gardens to earn 3 more.");
   };
   const togglePause = () => {
     play("tap");
@@ -804,38 +940,85 @@ function App() {
   }, [screen, busy, search]);
   const change = <K extends keyof Settings>(key: K, value: Settings[K]) =>
     setSettings({ ...settings, [key]: value });
-  const level = levels.find((l) => l.puzzle.id === puzzle.id),
+  const levelNumber = levelNumberOf(puzzle.id),
+    level = useMemo(
+      () =>
+        levelNumber === null
+          ? undefined
+          : { number: levelNumber, name: levelName(levelNumber) },
+      [levelNumber],
+    ),
+    chapter = chapterOf(levelNumber),
+    chapterLook = chapter === null ? null : chapterTheme(chapter),
     seconds = Math.floor(s.elapsedMs / 1000),
     stars = profile.completed[puzzle.id]?.stars ?? 0,
     left = s.tiles.filter((t) => !t.removed).length + s.tray.length,
     progress = 1 - left / s.tiles.length;
   // Faces follow each group's category tag, so a restored save redraws exactly.
-  const tagKey = s.tiles.map((t) => t.tag ?? "").join(),
+  const highest = highestCleared(profile.completed),
+    slots = customTileSlots(highest),
+    myFaces = useMemo(
+      () => customTiles.slice(0, slots).map(customFace),
+      [customTiles, slots],
+    ),
+    tagKey = s.tiles.map((t) => t.tag ?? "").join(),
     faces = useMemo(
       () =>
-        facesFor(s.tiles, puzzle.id, level?.number ?? null, settings.progression),
-      [puzzle.id, level, settings.progression, tagKey],
+        facesFor(
+          s.tiles,
+          puzzle.id,
+          level?.number ?? null,
+          myFaces,
+        ),
+      [puzzle.id, level, tagKey, myFaces],
     ),
     newPacks =
-      level && s.status === "won" && settings.progression
+      level && s.status === "won"
         ? packsUnlockedBy(level.number)
         : [],
     runningBonuses = s.bonuses
       .filter((b) => s.status === "playing" && isBonusRunning(s, b))
       .sort((a, b) => a.remainingMs - b.remainingMs),
     combo = s.combo,
-    clearedUpTo = Math.max(
-      0,
-      ...levels
-        .filter((l) => l.puzzle.id in profile.completed)
-        .map((l) => l.number),
-    ),
+    clearedUpTo = highest,
+    endlessOpenTo = endlessUnlockedUpTo(profile.completed),
+    canPlay = (n: number) =>
+      isEndless(n) ? n <= endlessOpenTo : isUnlocked(n, profile.completed),
+    statusColor = chapterLook?.felt2 ?? themeColors[settings.theme],
     rushName = (tag: string) =>
-      tag === "programming"
-        ? "Code Rush"
-        : tag === "animal"
-          ? "Animal Rush"
-          : "Bamboo Rush";
+      ({
+        programming: "Code Rush",
+        animal: "Animal Rush",
+        fruit: "Fruit Rush",
+        icon: "Icon Rush",
+        social: "Social Rush",
+        india: "India Rush",
+      })[tag] ?? "Bamboo Rush";
+  useEffect(() => {
+    document
+      .querySelector('meta[name="theme-color"]')
+      ?.setAttribute("content", statusColor);
+  }, [statusColor]);
+  async function addCustomTile(kind: CustomTile["kind"], value: string) {
+    const tile: CustomTile = {
+        id: crypto.randomUUID(),
+        kind,
+        value,
+        created: Date.now(),
+      },
+      next = [...customTiles, tile];
+    if (kind === "photo") await preloadPhoto(tile.id, value);
+    await saveCustomTiles(next);
+    setCustomTiles(next);
+    setTileError("");
+    setEmojiDraft("");
+    play("bonus");
+  }
+  async function removeCustomTile(id: string) {
+    const next = customTiles.filter((t) => t.id !== id);
+    await saveCustomTiles(next);
+    setCustomTiles(next);
+  }
   function open(next: Screen) {
     play("open");
     setScreen(next);
@@ -910,7 +1093,7 @@ function App() {
   const titles: Partial<Record<Screen, string>> = {
     help: text.how,
     privacy: "Privacy & data",
-    leaderboards: "Verified online leaderboard",
+    leaderboards: "Rankings",
     account: user ? "Your account" : "Sign in",
     admin: "Admin dashboard",
     campaign: text.campaign,
@@ -921,7 +1104,17 @@ function App() {
   const welcome = screen === "welcome";
   const sheet = screen !== "game" && !welcome;
   return (
-    <div className="app">
+    <div
+      className="app"
+      style={
+        chapterLook
+          ? ({
+              "--felt-1": chapterLook.felt1,
+              "--felt-2": chapterLook.felt2,
+            } as CSSProperties)
+          : undefined
+      }
+    >
       <header className="topbar">
         <button
           className="level-title"
@@ -931,7 +1124,9 @@ function App() {
           <span className="eyebrow">
             {puzzle.id.startsWith("daily-")
               ? "DAILY · UTC"
-              : `LEVEL ${level?.number ?? 1}`}
+              : chapterLook
+                ? `LEVEL ${level?.number} · ${chapterLook.name.toUpperCase()}`
+                : `LEVEL ${level?.number ?? 1}`}
             <span>•</span>
             {puzzle.difficulty.toUpperCase()}
           </span>
@@ -1084,13 +1279,18 @@ function App() {
             );
           })}
         </div>
-        <section className="table" aria-busy={busy}>
+        <section className="table" aria-busy={busy || growing !== null}>
+          {growing !== null && (
+            <div className="growing" role="status">
+              <div className="spinner" aria-hidden="true" />
+              Growing garden {growing}…
+            </div>
+          )}
           {s.status !== "paused" ? (
             <Suspense fallback={<div className="board-loading" />}>
               <Board
                 state={s}
                 onSelect={select}
-                large={settings.large}
                 faces={faces}
                 reducedMotion={settings.reducedMotion}
                 introKey={`${attemptId}-${s.shuffles}`}
@@ -1133,13 +1333,34 @@ function App() {
                   {s.moves} pairs · {s.score.toLocaleString()} points · +25
                   garden coins on first completion
                 </p>
-                {level && level.number < 100 && (
+                {level && level.number < CAMPAIGN_SIZE && (
                   <p className="unlock-chip">
                     <Icon name="star" size={14} fill /> Level{" "}
-                    {level.number + 1} unlocked ·{" "}
-                    {levels[level.number].puzzle.difficulty}
+                    {level.number + 1} unlocked
                   </p>
                 )}
+                {level?.number === CAMPAIGN_SIZE && (
+                  <p className="unlock-chip">
+                    <Icon name="star" size={14} fill /> Endless gardens open ·
+                    levels {CAMPAIGN_SIZE + 1}–{endlessOpenTo}
+                  </p>
+                )}
+                {level &&
+                  isEndless(level.number) &&
+                  endlessCleared(profile.completed) % ENDLESS_BATCH === 0 && (
+                    <p className="unlock-chip">
+                      <Icon name="star" size={14} fill /> {ENDLESS_BATCH} new
+                      gardens unlocked · up to level {endlessOpenTo}
+                    </p>
+                  )}
+                {level &&
+                  customTileSlots(level.number) >
+                    customTileSlots(level.number - 1) && (
+                    <p className="unlock-chip">
+                      <Icon name="star" size={14} fill /> New custom tile slot ·
+                      make one in Profile
+                    </p>
+                  )}
                 {newPacks.map((pack) => (
                   <div key={pack.name} className="pack-unlock">
                     <strong>New tiles unlocked · {pack.name}</strong>
@@ -1152,10 +1373,10 @@ function App() {
                 ))}
                 <div className="row">
                   <button onClick={() => start(puzzle)}>Play again</button>
-                  {level && level.number < 100 && (
+                  {level && canPlay(level.number + 1) && (
                     <button
                       className="primary"
-                      onClick={() => start(levels[level.number].puzzle)}
+                      onClick={() => startLevel(level.number + 1)}
                     >
                       {text.next}
                     </button>
@@ -1168,9 +1389,17 @@ function App() {
             <div className="outcome">
               <div className="outcome-card lost">
                 <h2>Tray full</h2>
-                <p>Four different tiles filled the tray. Undo the last move or start the garden again.</p>
+                <p>
+                  {profile.undos > 0
+                    ? "Four different tiles filled the tray. Undo the last move or start the garden again."
+                    : "Four different tiles filled the tray, and you have no undos left. Start the garden again — every ten gardens cleared earns 3 undos."}
+                </p>
                 <div className="row">
-                  <button onClick={doUndo}>Undo</button>
+                  {profile.undos > 0 && (
+                    <button onClick={doUndo}>
+                      Undo last move ({profile.undos} left)
+                    </button>
+                  )}
                   <button className="primary" onClick={() => start(puzzle)}>
                     Try again
                   </button>
@@ -1191,10 +1420,19 @@ function App() {
           <button
             data-sfx
             onClick={doUndo}
-            disabled={!s.history.length || busy || s.status === "paused"}
+            disabled={
+              !s.history.length ||
+              busy ||
+              s.status === "paused" ||
+              profile.undos <= 0
+            }
+            aria-label={`${text.undo}, ${profile.undos} left`}
           >
             <span className="tool-icon">
               <Icon name="undo" />
+              <small className={`badge ${profile.undos ? "" : "empty"}`}>
+                {profile.undos}
+              </small>
             </span>
             {text.undo}
           </button>
@@ -1276,7 +1514,7 @@ function App() {
               } else if (key === "game") {
                 // From the daily puzzle, Play returns to the campaign.
                 if (puzzle.id.startsWith("daily-"))
-                  start(levels[Math.min(clearedUpTo, levels.length - 1)].puzzle);
+                  startLevel(nextPlayable(profile.completed));
                 else setScreen("game");
               }
               else open(key);
@@ -1396,6 +1634,13 @@ function App() {
                     onMerge={setProfile}
                     onAdmin={() => setScreen("admin")}
                     onOnline={() => {
+                      if (!levels.some((l) => l.puzzle.id === puzzle.id)) {
+                        setNotice(
+                          "Verified online runs are for the 100 handmade levels and dailies. Generated levels are casual.",
+                        );
+                        setScreen("game");
+                        return;
+                      }
                       void api
                         .run(puzzle.id)
                         .then((ticket) => {
@@ -1444,47 +1689,132 @@ function App() {
               {screen === "campaign" && (
                 <>
                   <p className="muted">
-                    100 gardens, each harder than the last. Clear a garden to
-                    open the next · {Object.keys(profile.completed).length}{" "}
-                    completed.
+                    {CAMPAIGN_SIZE} handmade gardens, each harder than the
+                    last, then endless generated gardens ·{" "}
+                    {Object.keys(profile.completed).length} completed.
                   </p>
-                  {(["gentle", "balanced", "challenging"] as const).map(
-                    (band) => (
-                      <section key={band} className="band">
-                        <h3>{band}</h3>
-                        <div className="levels">
-                          {levels.map((l, index) => {
-                            if (l.puzzle.difficulty !== band) return null;
-                            const got =
-                                profile.completed[l.puzzle.id]?.stars ?? 0,
-                              open =
-                                !settings.progression ||
-                                unlocked(index, profile.completed);
-                            return (
+                  {[0, 1, 2, 3].map((block) => (
+                    <section key={block} className="band">
+                      <h3>
+                        Levels {block * 25 + 1}–{block * 25 + 25}
+                      </h3>
+                      <div className="levels">
+                        {levels.slice(block * 25, block * 25 + 25).map((l) => {
+                          const got =
+                              profile.completed[l.puzzle.id]?.stars ?? 0,
+                            open = canPlay(l.number);
+                          return (
+                            <button
+                              key={l.number}
+                              className={`${got ? "done" : ""} ${l.puzzle.id === puzzle.id ? "current" : ""} ${open ? "" : "locked"}`}
+                              disabled={!open}
+                              onClick={() => startLevel(l.number)}
+                              aria-label={`Play level ${l.number}${open ? "" : " (locked)"}`}
+                            >
+                              <strong>{open ? l.number : "🔒"}</strong>
+                              <span>{l.name}</span>
+                              <small>
+                                {l.puzzle.tiles.length} tiles ·{" "}
+                                {[0, 1, 2].map((i) => (
+                                  <i key={i} className={i < got ? "on" : ""}>
+                                    ★
+                                  </i>
+                                ))}
+                              </small>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </section>
+                  ))}
+                  <section className="band endless">
+                    <h3>Endless gardens</h3>
+                    {endlessOpenTo ? (
+                      (() => {
+                        const first = CAMPAIGN_SIZE + 1,
+                          next = nextPlayable(profile.completed),
+                          pageStart =
+                            endlessPage ??
+                            Math.max(
+                              first,
+                              first +
+                                Math.floor((Math.max(next, first) - first) / ENDLESS_PAGE) *
+                                  ENDLESS_PAGE,
+                            ),
+                          pageEnd = Math.min(
+                            pageStart + ENDLESS_PAGE - 1,
+                            endlessOpenTo + 1,
+                          );
+                        return (
+                          <>
+                            <p className="muted">
+                              Levels {first}–{endlessOpenTo} are open.{" "}
+                              {`Clear ${nextBatchIn(profile.completed)} more to open the next ${ENDLESS_BATCH}.`}{" "}
+                              Generated levels are casual: they are not on the
+                              verified leaderboard.
+                            </p>
+                            <div className="levels">
+                              {Array.from(
+                                { length: pageEnd - pageStart + 1 },
+                                (_, i) => pageStart + i,
+                              ).map((n) => {
+                                const id = `endless-${n}`,
+                                  got = profile.completed[id]?.stars ?? 0,
+                                  open = canPlay(n),
+                                  ch = chapterTheme(chapterOf(n)!);
+                                return (
+                                  <button
+                                    key={n}
+                                    className={`${got ? "done" : ""} ${id === puzzle.id ? "current" : ""} ${open ? "" : "locked"}`}
+                                    style={{ "--chip": ch.felt1 } as CSSProperties}
+                                    disabled={!open}
+                                    onClick={() => startLevel(n)}
+                                    aria-label={`Play level ${n}${open ? "" : " (locked)"}`}
+                                  >
+                                    <strong>{open ? n : "🔒"}</strong>
+                                    <span>{ch.name}</span>
+                                    <small>
+                                      {[0, 1, 2].map((i) => (
+                                        <i key={i} className={i < got ? "on" : ""}>
+                                          ★
+                                        </i>
+                                      ))}
+                                    </small>
+                                  </button>
+                                );
+                              })}
+                            </div>
+                            <div className="row pager">
                               <button
-                                key={l.number}
-                                className={`${got ? "done" : ""} ${l.puzzle.id === puzzle.id ? "current" : ""} ${open ? "" : "locked"}`}
-                                disabled={!open}
-                                onClick={() => start(l.puzzle)}
-                                aria-label={`Play level ${l.number}${open ? "" : " (locked)"}`}
+                                disabled={pageStart <= first}
+                                onClick={() =>
+                                  setEndlessPage(Math.max(first, pageStart - ENDLESS_PAGE))
+                                }
                               >
-                                <strong>{open ? l.number : "🔒"}</strong>
-                                <span>{l.name}</span>
-                                <small>
-                                  {l.puzzle.tiles.length} tiles ·{" "}
-                                  {[0, 1, 2].map((i) => (
-                                    <i key={i} className={i < got ? "on" : ""}>
-                                      ★
-                                    </i>
-                                  ))}
-                                </small>
+                                ‹ Earlier
                               </button>
-                            );
-                          })}
-                        </div>
-                      </section>
-                    ),
-                  )}
+                              <span className="muted">
+                                {pageStart}–{pageEnd}
+                              </span>
+                              <button
+                                disabled={pageEnd >= endlessOpenTo}
+                                onClick={() => setEndlessPage(pageStart + ENDLESS_PAGE)}
+                              >
+                                Later ›
+                              </button>
+                            </div>
+                          </>
+                        );
+                      })()
+                    ) : (
+                      <p className="muted">
+                        🔒 Clear level {CAMPAIGN_SIZE} to open {50} endless
+                        gardens. After that, every {ENDLESS_BATCH} cleared open{" "}
+                        {ENDLESS_BATCH} more, forever, each chapter with its own
+                        board colours.
+                      </p>
+                    )}
+                  </section>
                 </>
               )}
               {screen === "profile" && (
@@ -1541,9 +1871,102 @@ function App() {
                   >
                     <Icon name="palette" size={18} /> {text.shop}
                   </button>
+                  <h3>My tiles</h3>
+                  {slots === 0 ? (
+                    <p className="muted">
+                      🔒 Clear level {nextCustomSlotAt(highest)} to make your
+                      own tile from an emoji or a photo.
+                    </p>
+                  ) : (
+                    <>
+                      <p className="muted">
+                        {customTiles.length} of {slots} slot
+                        {slots === 1 ? "" : "s"} used · next slot at level{" "}
+                        {nextCustomSlotAt(highest)}. Your tiles appear on every
+                        board. Photos stay on this device.
+                      </p>
+                      <div className="my-tiles">
+                        {customTiles.map((t, i) => (
+                          <div
+                            key={t.id}
+                            className={`my-tile ${i < slots ? "" : "idle"}`}
+                          >
+                            <TileCanvas face={customFace(t)} width={40} />
+                            <button
+                              className="icon-btn"
+                              aria-label="Delete this tile"
+                              onClick={() => void removeCustomTile(t.id)}
+                            >
+                              <Icon name="close" size={14} />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                      {customTiles.length < slots && (
+                        <div className="tile-maker">
+                          <label className="field row-field">
+                            <span>Emoji</span>
+                            <input
+                              value={emojiDraft}
+                              maxLength={16}
+                              placeholder="🦄"
+                              aria-label="Emoji for your tile"
+                              onChange={(e) => setEmojiDraft(e.target.value)}
+                            />
+                          </label>
+                          <button
+                            className="primary"
+                            disabled={!emojiDraft.trim()}
+                            onClick={() => {
+                              const emoji = validEmoji(emojiDraft);
+                              if (!emoji)
+                                return setTileError("Type a single emoji.");
+                              if (
+                                customTiles.some(
+                                  (t) => t.kind === "emoji" && t.value === emoji,
+                                )
+                              )
+                                return setTileError("You already have that one.");
+                              void addCustomTile("emoji", emoji);
+                            }}
+                          >
+                            Make emoji tile
+                          </button>
+                          <label className="block photo-pick">
+                            <Icon name="palette" size={18} /> Make tile from a
+                            photo
+                            <input
+                              type="file"
+                              accept="image/*"
+                              aria-label="Photo for your tile"
+                              onChange={(e) => {
+                                const file = e.target.files?.[0];
+                                e.target.value = "";
+                                if (!file) return;
+                                photoToDataUrl(file)
+                                  .then((url) => addCustomTile("photo", url))
+                                  .catch((err) =>
+                                    setTileError(
+                                      err instanceof Error
+                                        ? err.message
+                                        : "That photo could not be used.",
+                                    ),
+                                  );
+                              }}
+                            />
+                          </label>
+                        </div>
+                      )}
+                      {tileError && (
+                        <p className="form-note error" role="alert">
+                          {tileError}
+                        </p>
+                      )}
+                    </>
+                  )}
                   <h3>Tile collection</h3>
                   <p className="muted">
-                    {totalTypes(settings.progression ? clearedUpTo + 1 : null)}{" "}
+                    {totalTypes(clearedUpTo + 1)}{" "}
                     tile types unlocked. Each pack opens after its level.
                   </p>
                   <ul className="packs">
@@ -1570,8 +1993,7 @@ function App() {
                       <small>36 tiles · from the start</small>
                     </li>
                     {packs.map((p) => {
-                      const open =
-                        !settings.progression || clearedUpTo >= p.after;
+                      const open = clearedUpTo >= p.after;
                       return (
                         <li key={p.name} className={open ? "open" : ""}>
                           <strong>{p.name}</strong>
@@ -1588,7 +2010,9 @@ function App() {
                             {p.faces.length}{" "}
                             {p.category === "programming"
                               ? "logos"
-                              : "animals"}{" "}
+                              : p.category === "animal"
+                                ? "animals"
+                                : "tiles"}{" "}
                             · after level {p.after}
                           </small>
                         </li>
@@ -1668,20 +2092,20 @@ function App() {
                         <button
                           key={theme}
                           className={`theme-card t-${theme} ${settings.theme === theme ? "active" : ""}`}
-                          disabled={!owned && balance(profile) < 100}
+                          disabled={
+                            !owned && balance(profile) < themePrices[theme]
+                          }
                           onClick={() => {
-                            if (!owned)
-                              setProfile({
-                                ...profile,
-                                purchases: [...profile.purchases, theme],
-                              });
+                            if (!owned) setProfile(buyTheme(profile, theme));
                             change("theme", theme);
                           }}
                         >
                           <span className="swatch" aria-hidden="true" />
                           <strong>{theme}</strong>
                           <small>
-                            {owned ? "Use theme" : "100 garden coins"}
+                            {owned
+                              ? "Use theme"
+                              : `${themePrices[theme]} garden coins`}
                             {settings.theme === theme ? " ✓" : ""}
                           </small>
                         </button>
@@ -1728,103 +2152,6 @@ function App() {
                     />
                     <span>Vibration</span>
                   </label>
-                  <h3>Bonus & scoring</h3>
-                  <p className="muted">
-                    Applies from the next board you start.
-                  </p>
-                  <label className="field row-field">
-                    <span>
-                      Bonus tiles · {Math.round(settings.bonusFrequency * 100)}%
-                    </span>
-                    <input
-                      type="range"
-                      min="0"
-                      max="0.3"
-                      step="0.05"
-                      value={settings.bonusFrequency}
-                      onChange={(e) =>
-                        change("bonusFrequency", Number(e.target.value))
-                      }
-                    />
-                  </label>
-                  <label className="field row-field">
-                    <span>Bonus timer · {settings.bonusSeconds}s</span>
-                    <input
-                      type="range"
-                      min="8"
-                      max="30"
-                      step="1"
-                      value={settings.bonusSeconds}
-                      onChange={(e) =>
-                        change("bonusSeconds", Number(e.target.value))
-                      }
-                    />
-                  </label>
-                  <label className="field row-field">
-                    <span>Multipliers</span>
-                    <select
-                      value={settings.multipliers}
-                      onChange={(e) =>
-                        change(
-                          "multipliers",
-                          e.target.value as Settings["multipliers"],
-                        )
-                      }
-                    >
-                      <option value="gentle">Gentle · 2× 3×</option>
-                      <option value="standard">Standard · 2× 3× 5×</option>
-                      <option value="big">Big · 3× 5× 10×</option>
-                    </select>
-                  </label>
-                  <label className="field row-field">
-                    <span>
-                      Programming tiles ·{" "}
-                      {Math.round(settings.programmingShare * 100)}%
-                    </span>
-                    <input
-                      type="range"
-                      min="0"
-                      max="0.4"
-                      step="0.05"
-                      value={settings.programmingShare}
-                      onChange={(e) =>
-                        change("programmingShare", Number(e.target.value))
-                      }
-                    />
-                  </label>
-                  <label className="field row-field">
-                    <span>
-                      Animal tiles · {Math.round(settings.animalShare * 100)}%
-                    </span>
-                    <input
-                      type="range"
-                      min="0"
-                      max="0.4"
-                      step="0.05"
-                      value={settings.animalShare}
-                      onChange={(e) =>
-                        change("animalShare", Number(e.target.value))
-                      }
-                    />
-                  </label>
-                  <label className="switch">
-                    <input
-                      type="checkbox"
-                      role="switch"
-                      checked={settings.comboRewards}
-                      onChange={(e) => change("comboRewards", e.target.checked)}
-                    />
-                    <span>Combo rewards</span>
-                  </label>
-                  <label className="switch">
-                    <input
-                      type="checkbox"
-                      role="switch"
-                      checked={settings.progression}
-                      onChange={(e) => change("progression", e.target.checked)}
-                    />
-                    <span>Unlock levels and tiles step by step</span>
-                  </label>
                   <h3>Gameplay & accessibility</h3>
                   {(
                     ["timer", "large", "contrast", "reducedMotion"] as const
@@ -1840,7 +2167,7 @@ function App() {
                         {
                           [
                             "Show timer",
-                            "Large tile controls",
+                            "Show tile list (screen readers)",
                             "High contrast",
                             "Reduce motion",
                           ][i]
@@ -1903,6 +2230,8 @@ function App() {
                     providers may keep access logs under their own policies.
                   </p>
                   <p>
+                    Custom tiles you make, including photos, are stored only
+                    in this browser on this device and are never uploaded.
                     Export or erase your local data in Settings. Clearing
                     browser storage also removes progress. No personal account
                     is required. A region-specific legal review is required

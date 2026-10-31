@@ -1,7 +1,8 @@
 import { useEffect, useRef, type RefObject } from "react";
 import Phaser from "phaser";
 import { classicFace, faceKey, type Face } from "./TileDefinitions";
-import { paintTile, type Look } from "./TileRenderer";
+import { isPhotoReady, paintTile, type Look } from "./TileRenderer";
+import { play } from "../services/feedback";
 import {
   isBonusRunning,
   isTileFree,
@@ -14,7 +15,6 @@ const burst = [0xf3d48c, 0xffffff, 0x9fd6a8, 0xe9b65c];
 type Props = {
   state: State;
   onSelect: (id: string) => void;
-  large: boolean;
   /** Picture for each match group on this board. */
   faces: Record<string, Face>;
   reducedMotion: boolean;
@@ -69,10 +69,13 @@ export default function Board(props: Props) {
       s.invalidate();
     });
     observer.observe(el);
+    const photoReady = () => s.invalidate();
+    window.addEventListener("tile-photo-ready", photoReady);
     if (props.locate) props.locate.current = (id) => s.tileRect(id, el);
     return () => {
       if (props.locate) props.locate.current = null;
       observer.disconnect();
+      window.removeEventListener("tile-photo-ready", photoReady);
       scene.current = null;
       game.destroy(true);
     };
@@ -82,7 +85,7 @@ export default function Board(props: Props) {
   }, [props.shake]);
   return (
     <div
-      className={`canvas ${props.large ? "large" : ""}`}
+      className="canvas"
       ref={host}
       aria-hidden="true"
     />
@@ -124,7 +127,8 @@ class BoardScene extends Phaser.Scene {
   }
   position(t: Tile) {
     const { tiles } = this.props().state;
-    const key = tiles.map((t) => t.id).join();
+    // Positions, not just ids: different levels reuse the ids t0…tN.
+    const key = tiles.map((t) => `${t.id}:${t.x}:${t.y}:${t.z}`).join();
     if (key !== this.layoutKey) {
       this.layoutKey = key;
       const minX = Math.min(...tiles.map((t) => t.x)),
@@ -155,8 +159,10 @@ class BoardScene extends Phaser.Scene {
     };
   }
   create() {
+    // A quick tap picks the tile. Press and hold, or drag, to lift it aside
+    // and peek at what lies underneath; on release it springs back unpicked.
     this.input.on("pointerdown", (p: Phaser.Input.Pointer) => {
-      const { state, onSelect } = this.props();
+      const { state } = this.props();
       if (state.status !== "playing") return;
       const t = state.tiles
         .filter((t) => !t.removed)
@@ -167,7 +173,89 @@ class BoardScene extends Phaser.Scene {
             p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h
           );
         });
-      if (t) onSelect(t.id);
+      if (!t) return;
+      this.press = {
+        id: t.id,
+        x: p.x,
+        y: p.y,
+        peeking: false,
+        timer: this.time.delayedCall(260, () => this.startPeek(p)),
+      };
+    });
+    this.input.on("pointermove", (p: Phaser.Input.Pointer) => {
+      const press = this.press;
+      if (!press || !p.isDown) return;
+      if (!press.peeking) {
+        if (Math.hypot(p.x - press.x, p.y - press.y) > 10 * this.dpr)
+          this.startPeek(p);
+        return;
+      }
+      const c = this.drawn.get(press.id);
+      if (c && press.home) {
+        c.x = press.home.x + press.offset!.x + (p.x - press.x);
+        c.y = press.home.y + press.offset!.y + (p.y - press.y);
+      }
+    });
+    const release = () => {
+      const press = this.press;
+      this.press = null;
+      if (!press) return;
+      press.timer.remove();
+      if (!press.peeking) {
+        if (this.props().state.status === "playing")
+          this.props().onSelect(press.id);
+        return;
+      }
+      const c = this.drawn.get(press.id);
+      if (!c || !press.home) return;
+      this.tweens.add({
+        targets: c,
+        x: press.home.x,
+        y: press.home.y,
+        scale: 1,
+        alpha: 1,
+        duration: 220,
+        ease: "Back.easeOut",
+        onComplete: () => c.setDepth(press.home!.depth),
+      });
+    };
+    this.input.on("pointerup", release);
+    this.input.on("pointerupoutside", release);
+  }
+  press: {
+    id: string;
+    x: number;
+    y: number;
+    peeking: boolean;
+    timer: Phaser.Time.TimerEvent;
+    home?: { x: number; y: number; depth: number };
+    offset?: { x: number; y: number };
+  } | null = null;
+  /** Lift the pressed tile and slide it up so the tile beneath shows. */
+  startPeek(p: Phaser.Input.Pointer) {
+    const press = this.press,
+      c = press && this.drawn.get(press.id);
+    if (!press || press.peeking || !c) return;
+    press.peeking = true;
+    press.timer.remove();
+    press.home = { x: c.x, y: c.y, depth: c.depth };
+    // Slide up by most of a tile so the one below is readable at once;
+    // dragging then moves it freely from there.
+    const t = this.props().state.tiles.find((t) => t.id === press.id)!,
+      { h } = this.position(t);
+    press.offset = { x: 0, y: -h * 0.75 };
+    press.x = p.x;
+    press.y = p.y;
+    play("tap");
+    this.tweens.killTweensOf(c);
+    c.setDepth(2500);
+    this.tweens.add({
+      targets: c,
+      y: c.y - h * 0.75,
+      scale: 1.08,
+      alpha: 0.88,
+      duration: 160,
+      ease: "Cubic.easeOut",
     });
   }
   /** Cached high-resolution tile picture for this face, look and size. */
@@ -181,7 +269,11 @@ class BoardScene extends Phaser.Scene {
       this.purgeTextures();
       this.time.delayedCall(1500, () => this.purgeTextures());
     }
-    const key = `tile|${faceKey(face)}|${look}|${badge ?? ""}|${size}`;
+    // A photo still loading gets its own key, so its placeholder is never
+    // reused once the picture is ready.
+    const pending =
+        face.kind === "photo" && !isPhotoReady(face.id) ? "|pending" : "",
+      key = `tile|${faceKey(face)}${pending}|${look}|${badge ?? ""}|${size}`;
     if (!this.textures.exists(key)) {
       const pad = Math.ceil(w * 0.12),
         tex = this.textures.createCanvas(key, Math.ceil(w + pad * 2), Math.ceil(h + pad * 2))!;
@@ -451,6 +543,10 @@ class BoardScene extends Phaser.Scene {
       ]);
     if (sig === this.signature) return;
     this.signature = sig;
+    if (this.press) {
+      this.press.timer.remove();
+      this.press = null;
+    }
     const fresh = introKey !== this.intro;
     this.intro = introKey;
     for (const [id, c] of this.drawn) {

@@ -102,7 +102,6 @@ export default function Admin() {
           <Board
             state={initial(previewPuzzle.tiles)}
             onSelect={() => {}}
-            large={false}
             faces={{}}
             reducedMotion={true}
             introKey={previewPuzzle.id}
