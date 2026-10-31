@@ -1,6 +1,7 @@
 // Small stroke icon set (24×24, currentColor) so the UI needs no icon font.
 const paths = {
   play: "M7 4.5v15l12-7.5z",
+  gift: "M4 11h16v10H4zM3 7h18v4H3zM12 7v14M12 7S10.5 3 8 3a2 2 0 0 0 0 4M12 7s1.5-4 4-4a2 2 0 0 1 0 4",
   grid: "M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z",
   calendar: "M4 6h16v14H4zM4 10h16M8 3v5M16 3v5",
   trophy:

@@ -13,7 +13,8 @@ export type Cue =
   | "open"
   | "close"
   | "bonus"
-  | "tick";
+  | "tick"
+  | "perfect";
 
 const haptics: Record<Cue, number | number[]> = {
   tap: 6,
@@ -29,6 +30,14 @@ const haptics: Record<Cue, number | number[]> = {
   close: 5,
   bonus: [20, 40, 20, 40, 60],
   tick: 4,
+  perfect: [20, 40, 20, 40, 20, 40, 140],
+};
+/** Matches and bonuses buzz a little longer as the combo grows. */
+const streakHaptic = (cue: Cue, streak: number): number | number[] => {
+  const base = haptics[cue];
+  if ((cue !== "match" && cue !== "bonus") || streak < 3) return base;
+  const extra = Math.min(4, streak - 2);
+  return [...(Array.isArray(base) ? base : [base]), ...Array(extra).fill(0).flatMap(() => [30, 18])];
 };
 
 let ctx: AudioContext | null = null;
@@ -123,7 +132,8 @@ function whoosh(at: number, dur: number, from: number, to: number) {
   src.stop(t + dur + 0.02);
 }
 
-const sounds: Record<Cue, () => void> = {
+/** k = pitch factor; matches climb a semitone per combo step. */
+const sounds: Record<Cue, (k: number) => void> = {
   tap: () => tone(1250, 0, 0.035, 0.05, "triangle"),
   open: () => tone(520, 0, 0.12, 0.06, "sine", 780),
   close: () => tone(700, 0, 0.1, 0.05, "sine", 460),
@@ -132,9 +142,9 @@ const sounds: Record<Cue, () => void> = {
     tone(880, 0, 0.07, 0.14, "triangle", 520);
     tone(220, 0, 0.05, 0.08, "sine", 160);
   },
-  match: () => {
-    bell(784, 0, 0.7, 0.13);
-    bell(1175, 0.07, 0.9, 0.11);
+  match: (k) => {
+    bell(784 * k, 0, 0.7, 0.13);
+    bell(1175 * k, 0.07, 0.9, 0.11);
   },
   blocked: () => {
     tone(190, 0, 0.12, 0.16, "square", 120);
@@ -150,8 +160,8 @@ const sounds: Record<Cue, () => void> = {
   },
   undo: () => tone(660, 0, 0.14, 0.08, "sine", 380),
   // Golden cascade for multipliers, combos and events.
-  bonus: () => {
-    [988, 1319, 1568, 1976].forEach((f, i) => bell(f, i * 0.05, 0.5, 0.09));
+  bonus: (k) => {
+    [988, 1319, 1568, 1976].forEach((f, i) => bell(f * k, i * 0.05, 0.5, 0.09));
     whoosh(0.05, 0.4, 2400, 6000);
   },
   tick: () => tone(1800, 0, 0.03, 0.04, "square"),
@@ -166,9 +176,18 @@ const sounds: Record<Cue, () => void> = {
     );
     [523, 659, 784].forEach((f) => bell(f, 0.62, 1.8, 0.08));
   },
+  // Win run, then a sparkling octave cascade and a bright held chord.
+  perfect: () => {
+    [523, 659, 784, 1047, 1319, 1568, 2093].forEach((f, i) =>
+      bell(f, i * 0.07, 0.7, 0.09),
+    );
+    whoosh(0.4, 0.6, 3000, 8000);
+    [784, 988, 1175, 1568].forEach((f) => bell(f, 0.6, 2.2, 0.07));
+  },
 };
 
-export function play(cue: Cue) {
+/** Plays a cue; `streak` (current combo) raises match/bonus pitch and buzz. */
+export function play(cue: Cue, streak = 0) {
   // Browsers only allow vibration after a real tap on the page.
   if (
     vibrate &&
@@ -176,14 +195,14 @@ export function play(cue: Cue) {
     (navigator.userActivation?.hasBeenActive ?? true)
   ) {
     try {
-      navigator.vibrate(haptics[cue]);
+      navigator.vibrate(streakHaptic(cue, streak));
     } catch {
       /* Some browsers block vibration outside a gesture. */
     }
   }
   if (volume <= 0) return;
   if (!audio()) return;
-  sounds[cue]();
+  sounds[cue](2 ** (Math.min(Math.max(streak - 1, 0), 12) / 12));
 }
 
 /** Gentle evolving pad: two detuned fifths through a breathing low-pass. */

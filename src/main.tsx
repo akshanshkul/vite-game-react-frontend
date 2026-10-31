@@ -17,6 +17,7 @@ import {
   trayHint,
   listLegalPairs,
   TRAY_SIZE,
+  trayCap,
   isBonusRunning,
   undo,
   applyAction,
@@ -43,6 +44,33 @@ import {
   CAMPAIGN_SIZE,
   ENDLESS_BATCH,
 } from "./services/content";
+import {
+  LOGIN_REWARDS,
+  canClaimLogin,
+  claimLogin,
+  claimMission,
+  hasClaimable,
+  localDay,
+  loginDayFor,
+  missionDone,
+  missionsFor,
+  recordPair,
+  recordWin,
+  todayStats,
+  type Reward,
+} from "./services/daily";
+import {
+  CHEST_REWARDS,
+  POWER_UPS,
+  STARS_PER_CHEST,
+  addStars,
+  openChest,
+  powerUps,
+  rewardLabel,
+  spendPowerUp,
+  starsGained,
+  type PowerUp,
+} from "./services/chests";
 import {
   earnUndos,
   migrateUndos,
@@ -103,6 +131,8 @@ type Flight = {
   partner: string | null;
   /** Sound to play when the pair merges, so audio matches the animation. */
   cue: Cue | null;
+  /** Combo after this pair, so the merge sound climbs with the streak. */
+  streak: number;
 };
 const TRAY_TILE = 40;
 /** Flies a tile along a gentle arc into its tray slot, then reports landing. */
@@ -190,6 +220,10 @@ function endlessPuzzle(n: number): Promise<Puzzle> {
   return job;
 }
 const ENDLESS_PAGE = 30;
+const formatTime = (ms: number) => {
+  const sec = Math.floor(ms / 1000);
+  return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`;
+};
 type Screen =
   | "game"
   | "welcome"
@@ -201,7 +235,8 @@ type Screen =
   | "privacy"
   | "account"
   | "admin"
-  | "leaderboards";
+  | "leaderboards"
+  | "today";
 type InstallPrompt = Event & { prompt: () => Promise<void> };
 /** Board themes: status-bar colour for each (shop order). */
 const themeColors: Record<Settings["theme"], string> = {
@@ -307,6 +342,18 @@ function App() {
   }, [user, syncProgress]);
   const [hint, setHint] = useState<Pair | null>(null);
   const [trayFlash, setTrayFlash] = useState(0);
+  /** Undo used during this attempt (a perfect clear needs none). */
+  const usedUndo = useRef(false);
+  /** Facts for the level-complete card, captured at the moment of winning. */
+  const [winStats, setWinStats] = useState<{
+    time: number;
+    bestBefore: number | null;
+    scoreBefore: number | null;
+    maxCombo: number;
+    perfect: boolean;
+    /** Stars this clear added toward the next chest. */
+    newStars: number;
+  } | null>(null);
   const [flights, setFlights] = useState<Flight[]>([]);
   /** Tray tiles already cleared by the engine but kept on screen until the
    *  flying partner reaches them. */
@@ -314,11 +361,12 @@ function App() {
     { id: string; index: number; popping: boolean }[]
   >([]);
   /** Pairs mid-merge: the arrived tile slides into its twin, then both pop. */
-  const merge = useCallback((id: string, partner: string, cue: Cue | null) => {
+  const merge = useCallback(
+    (id: string, partner: string, cue: Cue | null, streak = 0) => {
     const mine = document.querySelector<HTMLElement>(`.slot[data-id="${id}"]`),
       twin = document.querySelector<HTMLElement>(`.slot[data-id="${partner}"]`),
       pop = () => {
-        if (cue) play(cue);
+        if (cue) play(cue, streak);
         setTrayFlash(Date.now());
         setHeld((v) =>
           v.map((h) =>
@@ -345,7 +393,9 @@ function App() {
         { duration: 220, easing: "cubic-bezier(.5,0,.4,1)", fill: "forwards" },
       );
     slide.onfinish = pop;
-  }, []);
+    },
+    [],
+  );
   const facesRef = useRef<Record<string, Face>>({});
   /** Tray tiles that arrived by flight: they settle instead of sliding in. */
   const [landed, setLanded] = useState<string[]>([]);
@@ -362,7 +412,7 @@ function App() {
       // Let the tile settle in its slot for a beat, then slide into its twin.
       if (f.partner) {
         const partner = f.partner;
-        setTimeout(() => merge(f.id, partner, f.cue), 140);
+        setTimeout(() => merge(f.id, partner, f.cue, f.streak), 140);
       }
     },
     [merge],
@@ -546,10 +596,33 @@ function App() {
   }, [s.elapsedMs]);
   useEffect(() => {
     if (s.status === "won" && loaded) {
-      cue("win");
+      const before = profileRef.current.completed[puzzle.id],
+        perfect = !usedUndo.current && s.hints === 0 && s.shuffles === 0;
+      setWinStats({
+        time: s.elapsedMs,
+        bestBefore: before?.time ?? null,
+        scoreBefore: before?.score ?? null,
+        maxCombo: s.maxCombo ?? 0,
+        perfect,
+        newStars: 0,
+      });
+      cue(perfect ? "perfect" : "win");
       const earned = earnUndos(complete(profileRef.current, puzzle.id, s));
-      profileRef.current = earned.profile;
-      setProfile(earned.profile);
+      const recorded = recordWin(earned.profile, localDay(), {
+        usedUndo: usedUndo.current,
+        perfect,
+        daily: puzzle.id.startsWith("daily-"),
+        maxCombo: s.maxCombo ?? 0,
+        score: s.score,
+      });
+      const newStars = starsGained(
+          before?.stars,
+          recorded.completed[puzzle.id]?.stars ?? 0,
+        ),
+        withStars = addStars(recorded, newStars);
+      setWinStats((w) => (w ? { ...w, newStars } : w));
+      profileRef.current = withStars;
+      setProfile(withStars);
       if (earned.gained)
         setNotice(
           `+${earned.gained} undos (${earned.profile.undos}/${MAX_UNDOS}) for clearing ten more gardens.`,
@@ -731,6 +804,7 @@ function App() {
             target: id,
             partner: partner ?? null,
             cue,
+            streak: next.combo,
           },
         ]);
         // Keep the twin in place and give the arriving tile the next free
@@ -739,13 +813,21 @@ function App() {
           setHeld((v) => [
             ...v,
             { id: partner, index: state.tray.indexOf(partner), popping: false },
-            { id, index: TRAY_SIZE, popping: false },
+            { id, index: 99, popping: false },
           ]);
       }
       current.current = next;
       set(next);
       if (partner) {
         setMoves((v) => [...v, [partner, id]]);
+        const tracked = recordPair(profileRef.current, localDay(), {
+          bonus: !!next.lastAward?.labels.some((l) => l.endsWith("BONUS")),
+          combo: next.combo,
+        });
+        if (tracked !== profileRef.current) {
+          profileRef.current = tracked;
+          setProfile(tracked);
+        }
         if (!settings.reducedMotion) {
           setAnimating(true);
           setTimeout(() => setAnimating(false), 180);
@@ -753,7 +835,7 @@ function App() {
         // With a flight, sound and flash wait for the merge (see `merge`).
         if (!flies) {
           setTrayFlash(Date.now());
-          if (cue) play(cue);
+          if (cue) play(cue, next.combo);
         } else play("select");
         setNotice(
           next.status === "won"
@@ -765,7 +847,7 @@ function App() {
       } else {
         play("select");
         setNotice(
-          next.tray.length === TRAY_SIZE - 1
+          next.tray.length === trayCap(next) - 1
             ? "Careful: one slot left in the tray."
             : "Find its partner to clear them both.",
         );
@@ -861,6 +943,8 @@ function App() {
     [busy, s, puzzle.seed],
   );
   const start = (p: Puzzle) => {
+    usedUndo.current = false;
+    setWinStats(null);
     setAttemptId(crypto.randomUUID());
     setOnline(null);
     setMoves([]);
@@ -896,6 +980,7 @@ function App() {
     )
       return;
     const next = spendUndo(profileRef.current);
+    usedUndo.current = true;
     profileRef.current = next;
     setProfile(next);
     setOnline(null);
@@ -905,6 +990,29 @@ function App() {
     set((v) => undo(v));
     if (next.undos === 0)
       setNotice("That was your last undo. Clear ten gardens to earn 3 more.");
+  };
+  /** Uses one power-up if it changes the board; the run becomes casual. */
+  const usePowerUp = (kind: PowerUp) => {
+    const state = current.current,
+      type = kind === "slot" ? "extraSlot" : kind,
+      next = applyAction(state, { type } as Parameters<typeof applyAction>[1]),
+      paid = spendPowerUp(profileRef.current, kind);
+    if (next === state || !paid) return;
+    profileRef.current = paid;
+    setProfile(paid);
+    current.current = next;
+    set(next);
+    setOnline(null);
+    setHint(null);
+    setTrayFlash(Date.now());
+    play("bonus", next.combo);
+    setNotice(
+      kind === "magnet"
+        ? "Magnet! A pair snapped together."
+        : kind === "slot"
+          ? "Extra slot: 5 tray slots for this garden."
+          : "Freeze: bonus timers stop for 10 seconds.",
+    );
   };
   const togglePause = () => {
     play("tap");
@@ -984,6 +1092,11 @@ function App() {
     endlessOpenTo = endlessUnlockedUpTo(profile.completed),
     canPlay = (n: number) =>
       isEndless(n) ? n <= endlessOpenTo : isUnlocked(n, profile.completed),
+    today = localDay(),
+    rewardText = (r: Reward) =>
+      [r.coins && `${r.coins} coins`, r.undos && `${r.undos} undo${r.undos > 1 ? "s" : ""}`]
+        .filter(Boolean)
+        .join(" + "),
     statusColor = chapterLook?.felt2 ?? themeColors[settings.theme],
     rushName = (tag: string) =>
       ({
@@ -1092,6 +1205,7 @@ function App() {
         : screen;
   const titles: Partial<Record<Screen, string>> = {
     help: text.how,
+    today: "Today",
     privacy: "Privacy & data",
     leaderboards: "Rankings",
     account: user ? "Your account" : "Sign in",
@@ -1157,6 +1271,18 @@ function App() {
             <Icon name={s.status === "paused" ? "play" : "pause"} size={20} />
           </button>
           <button
+            className="icon-btn has-dot"
+            onClick={() => open("today")}
+            aria-label={
+              hasClaimable(profile, today) ? "Today (rewards ready)" : "Today"
+            }
+          >
+            <Icon name="gift" size={20} />
+            {hasClaimable(profile, today) && (
+              <span className="dot" aria-hidden="true" />
+            )}
+          </button>
+          <button
             className="icon-btn"
             onClick={() => open("help")}
             aria-label={text.how}
@@ -1214,8 +1340,14 @@ function App() {
         >
           <span style={{ width: `${progress * 100}%` }} />
         </div>
-        {(s.rush || runningBonuses.length > 0) && s.status === "playing" && (
+        {(s.rush || runningBonuses.length > 0 || (s.freezeMs ?? 0) > 0) &&
+          s.status === "playing" && (
           <div className="live-strip" aria-live="polite">
+            {(s.freezeMs ?? 0) > 0 && (
+              <span className="chip frozen">
+                ❄ Frozen · {Math.ceil((s.freezeMs ?? 0) / 1000)}s
+              </span>
+            )}
             {s.rush && (
               <span className="chip rush">
                 ⚡ {rushName(s.rush.tag)} {s.rush.multiplier}× ·{" "}
@@ -1239,10 +1371,10 @@ function App() {
           </div>
         )}
         <div
-          className={`tray ${trayFlash ? "flash" : ""} ${s.tray.length >= TRAY_SIZE - 1 ? "danger" : ""}`}
-          aria-label={`Tray: ${s.tray.length} of ${TRAY_SIZE} slots used`}
+          className={`tray ${trayFlash ? "flash" : ""} ${s.tray.length >= trayCap(s) - 1 ? "danger" : ""} ${trayCap(s) > TRAY_SIZE ? "wide" : ""}`}
+          aria-label={`Tray: ${s.tray.length} of ${trayCap(s)} slots used`}
         >
-          {Array.from({ length: TRAY_SIZE }, (_, i) => {
+          {Array.from({ length: trayCap(s) }, (_, i) => {
             // Partners already cleared by the engine stay in place until
             // the flying tile reaches them.
             const shown = [...s.tray];
@@ -1276,6 +1408,34 @@ function App() {
                   />
                 )}
               </span>
+            );
+          })}
+        </div>
+        <div className="powerups" role="group" aria-label="Power-ups">
+          {POWER_UPS.map((u) => {
+            const count = powerUps(profile)[u.id],
+              usable =
+                count > 0 &&
+                (u.id === "slot"
+                  ? (s.status === "playing" || s.status === "lost") &&
+                    trayCap(s) === TRAY_SIZE
+                  : s.status === "playing");
+            return (
+              <button
+                key={u.id}
+                data-sfx
+                className="power"
+                disabled={!usable || busy}
+                title={u.help}
+                aria-label={`${u.name}: ${u.help}. ${count} left`}
+                onClick={() => usePowerUp(u.id)}
+              >
+                <span aria-hidden="true">
+                  {u.id === "magnet" ? "🧲" : u.id === "slot" ? "➕" : "❄️"}
+                </span>
+                {u.name}
+                <b>{count}</b>
+              </button>
             );
           })}
         </div>
@@ -1321,6 +1481,9 @@ function App() {
                 ))}
               </div>
               <div className="outcome-card">
+                {winStats?.perfect && (
+                  <p className="perfect-banner">✨ Perfect clear ✨</p>
+                )}
                 <h2>Garden complete</h2>
                 <div className="stars" aria-label={`${stars} of 3 stars`}>
                   {[0, 1, 2].map((i) => (
@@ -1329,10 +1492,60 @@ function App() {
                     </span>
                   ))}
                 </div>
-                <p>
-                  {s.moves} pairs · {s.score.toLocaleString()} points · +25
-                  garden coins on first completion
-                </p>
+                {winStats && (
+                  <dl className="win-stats">
+                    <div>
+                      <dt>Time</dt>
+                      <dd>
+                        {formatTime(winStats.time)}
+                        {(winStats.bestBefore === null ||
+                          winStats.time < winStats.bestBefore) && (
+                          <em className="new-best">New best!</em>
+                        )}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Best time</dt>
+                      <dd>
+                        {formatTime(
+                          Math.min(
+                            winStats.time,
+                            winStats.bestBefore ?? Infinity,
+                          ),
+                        )}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Pairs</dt>
+                      <dd>{s.moves}</dd>
+                    </div>
+                    <div>
+                      <dt>Max combo</dt>
+                      <dd>×{Math.max(1, winStats.maxCombo)}</dd>
+                    </div>
+                    <div className="wide">
+                      <dt>Score</dt>
+                      <dd>
+                        {s.score.toLocaleString()}
+                        {winStats.scoreBefore !== null &&
+                          s.score > winStats.scoreBefore && (
+                            <em className="new-best">New best!</em>
+                          )}
+                      </dd>
+                    </div>
+                  </dl>
+                )}
+                {winStats && winStats.newStars > 0 && (
+                  <p className="unlock-chip">
+                    +{winStats.newStars} ★ toward a chest ·{" "}
+                    {(profile.chests ?? 0) > 0
+                      ? "a chest is ready in Today!"
+                      : `${profile.chestStars ?? 0}/${STARS_PER_CHEST}`}
+                  </p>
+                )}
+                {winStats?.bestBefore === null && (
+                  <p className="muted">+25 garden coins for a first clear</p>
+                )}
                 {level && level.number < CAMPAIGN_SIZE && (
                   <p className="unlock-chip">
                     <Icon name="star" size={14} fill /> Level{" "}
@@ -1395,6 +1608,11 @@ function App() {
                     : "Four different tiles filled the tray, and you have no undos left. Start the garden again — every ten gardens cleared earns 3 undos."}
                 </p>
                 <div className="row">
+                  {powerUps(profile).slot > 0 && trayCap(s) === TRAY_SIZE && (
+                    <button className="primary" onClick={() => usePowerUp("slot")}>
+                      ➕ Use extra slot ({powerUps(profile).slot})
+                    </button>
+                  )}
                   {profile.undos > 0 && (
                     <button onClick={doUndo}>
                       Undo last move ({profile.undos} left)
@@ -2220,6 +2438,155 @@ function App() {
                     Delete local data
                   </button>
                 </div>
+              )}
+              {screen === "today" && (
+                <>
+                  <h3>Daily gift</h3>
+                  <p className="muted">
+                    Come back each day for the next gift. Day 7 is the
+                    biggest. Missing a day starts again at day 1 — you keep
+                    everything you already have.
+                  </p>
+                  <ol className="calendar">
+                    {LOGIN_REWARDS.map((r, i) => {
+                      const day = i + 1,
+                        current = loginDayFor(profile, today),
+                        claimedToday = !canClaimLogin(profile, today),
+                        state =
+                          day < current || (day === current && claimedToday)
+                            ? "got"
+                            : day === current
+                              ? "now"
+                              : "later";
+                      return (
+                        <li key={day} className={`cal-day ${state} ${day === 7 ? "big" : ""}`}>
+                          <b>Day {day}</b>
+                          <span>{rewardText(r)}</span>
+                          {state === "got" && <i aria-label="claimed">✓</i>}
+                        </li>
+                      );
+                    })}
+                  </ol>
+                  <button
+                    className="primary block"
+                    disabled={!canClaimLogin(profile, today)}
+                    onClick={() => {
+                      const next = claimLogin(profileRef.current, today);
+                      if (next === profileRef.current) return;
+                      profileRef.current = next;
+                      setProfile(next);
+                      play("bonus");
+                      setNotice(
+                        `Daily gift: ${rewardText(LOGIN_REWARDS[next.login!.day - 1])}.`,
+                      );
+                    }}
+                  >
+                    {canClaimLogin(profile, today)
+                      ? `Claim day ${loginDayFor(profile, today)} · ${rewardText(LOGIN_REWARDS[loginDayFor(profile, today) - 1])}`
+                      : "Claimed today — see you tomorrow"}
+                  </button>
+                  <h3>Star chest</h3>
+                  <div className="chest-card">
+                    <span className="chest-icon" aria-hidden="true">
+                      {(profile.chests ?? 0) > 0 ? "🎁" : "🧰"}
+                    </span>
+                    <div>
+                      <strong>
+                        {(profile.chests ?? 0) > 0
+                          ? `${profile.chests} chest${profile.chests! > 1 ? "s" : ""} ready`
+                          : `${profile.chestStars ?? 0} / ${STARS_PER_CHEST} stars`}
+                      </strong>
+                      <div className="bar">
+                        <span
+                          style={{
+                            width: `${((profile.chestStars ?? 0) / STARS_PER_CHEST) * 100}%`,
+                          }}
+                        />
+                      </div>
+                      <small>
+                        New stars fill chests: a first clear or a better
+                        result. Next chest: {rewardLabel(
+                          CHEST_REWARDS[(profile.chestsOpened ?? 0) % CHEST_REWARDS.length],
+                        )}
+                        .
+                      </small>
+                    </div>
+                    <button
+                      className="primary"
+                      disabled={!(profile.chests ?? 0)}
+                      onClick={() => {
+                        const opened = openChest(profileRef.current);
+                        if (!opened) return;
+                        profileRef.current = opened.profile;
+                        setProfile(opened.profile);
+                        play("perfect");
+                        setNotice(`Chest opened: ${rewardLabel(opened.reward)}!`);
+                      }}
+                    >
+                      Open
+                    </button>
+                  </div>
+                  <details className="chest-table">
+                    <summary>What chests give</summary>
+                    <ol>
+                      {CHEST_REWARDS.map((r, i) => (
+                        <li key={i}>{rewardLabel(r)}</li>
+                      ))}
+                    </ol>
+                    <p className="muted small">
+                      Always in this order, then it repeats. No luck, nothing
+                      to buy. Using a power-up makes that run casual.
+                    </p>
+                  </details>
+                  <h3>Today's missions</h3>
+                  <ul className="missions">
+                    {missionsFor(today).map((m) => {
+                      const t = todayStats(profile, today),
+                        done = missionDone(m, t),
+                        claimed = t.claimed.includes(m.id),
+                        value = Math.min(m.progress(t), m.target);
+                      return (
+                        <li key={m.id} className={claimed ? "claimed" : ""}>
+                          <div>
+                            <strong>{m.text}</strong>
+                            <small>
+                              {m.target >= 100
+                                ? `${value.toLocaleString()} / ${m.target.toLocaleString()}`
+                                : `${value} / ${m.target}`}{" "}
+                              · {m.coins} coins
+                            </small>
+                            <div
+                              className="bar"
+                              role="progressbar"
+                              aria-valuenow={value}
+                              aria-valuemin={0}
+                              aria-valuemax={m.target}
+                            >
+                              <span style={{ width: `${(value / m.target) * 100}%` }} />
+                            </div>
+                          </div>
+                          <button
+                            className={done && !claimed ? "primary" : ""}
+                            disabled={!done || claimed}
+                            onClick={() => {
+                              const next = claimMission(profileRef.current, m.id, today);
+                              if (next === profileRef.current) return;
+                              profileRef.current = next;
+                              setProfile(next);
+                              play("bonus");
+                            }}
+                          >
+                            {claimed ? "✓" : "Claim"}
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                  <p className="muted small">
+                    New missions every day at midnight (your local time).
+                    Balance: {balance(profile)} garden coins.
+                  </p>
+                </>
               )}
               {screen === "privacy" && (
                 <>

@@ -164,3 +164,18 @@ test("shuffle keeps bonus pairs together and re-points their tiles", () => {
     assert.equal(x.matchGroup, y.matchGroup);
   }
 });
+
+test("max combo tracks the longest streak and undo restores it", () => {
+  const tiles = Array.from({ length: 6 }, (_, i) =>
+    tile(`t${i}`, i * 4, { matchGroup: `g${Math.floor(i / 2)}` }),
+  );
+  let s = initial(tiles);
+  s = pick(pick(s, "t0"), "t1");
+  s = pick(pick(tick(s, 1000), "t2"), "t3");
+  assert.equal(s.maxCombo, 2);
+  s = pick(pick(tick(s, 20000), "t4"), "t5");
+  assert.equal(s.combo, 1, "combo restarted after the window");
+  assert.equal(s.maxCombo, 2, "max keeps the best streak");
+  assert.equal(undo(undo(s)).maxCombo, 2);
+  assert.equal(undo(undo(undo(undo(s)))).maxCombo, 1);
+});

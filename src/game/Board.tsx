@@ -420,6 +420,40 @@ class BoardScene extends Phaser.Scene {
       ease: "Cubic.easeIn",
       onComplete: () => parts.forEach((p) => p.destroy()),
     });
+    // Combo fireworks: one more burst per combo step (up to 6), and a light
+    // shake from combo 4. Both skip under reduce motion (returned above).
+    if (award.combo >= 2) {
+      const bursts = Math.min(6, award.combo - 1),
+        colors = [0xf6c453, 0xff7a59, 0x9fd6a8, 0x7cc4ff, 0xf49ac1, 0xffffff];
+      for (let b = 0; b < bursts; b++)
+        this.time.delayedCall(b * 110, () => {
+          const bx = this.scale.width * (0.2 + Math.random() * 0.6),
+            by = this.scale.height * (0.15 + Math.random() * 0.45),
+            color = colors[(b + award.combo) % colors.length];
+          for (let i = 0; i < 18; i++) {
+            const a = (Math.PI * 2 * i) / 18,
+              dist = w * (0.9 + Math.random() * 0.7),
+              dot = this.add
+                .circle(bx, by, w * 0.05, color)
+                .setDepth(2998);
+            this.tweens.add({
+              targets: dot,
+              x: bx + Math.cos(a) * dist,
+              y: by + Math.sin(a) * dist + w * 0.3,
+              alpha: 0,
+              scale: 0.3,
+              duration: 650 + Math.random() * 250,
+              ease: "Cubic.easeOut",
+              onComplete: () => dot.destroy(),
+            });
+          }
+        });
+      if (award.combo >= 4)
+        this.cameras.main.shake(
+          160,
+          Math.min(0.012, 0.003 + award.combo * 0.0009),
+        );
+    }
     if (special)
       for (let i = 0; i < 26; i++) {
         const angle = Math.random() * Math.PI * 2,

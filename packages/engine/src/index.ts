@@ -28,9 +28,14 @@ export * from "./events";
 export * from "./scoring";
 export * from "./random";
 export const TRAY_SIZE = 4;
-export function status(tiles: Tile[], tray: string[] = []): State["status"] {
+export const trayCap = (s: Pick<State, "traySize">) => s.traySize ?? TRAY_SIZE;
+export function status(
+  tiles: Tile[],
+  tray: string[] = [],
+  size = TRAY_SIZE,
+): State["status"] {
   if (tiles.every((t) => t.removed) && !tray.length) return "won";
-  if (tray.length >= TRAY_SIZE) return "lost";
+  if (tray.length >= size) return "lost";
   // With room in the tray the player can always lift a free tile.
   return listFreeTiles({ tiles }).length ? "playing" : "stuck";
 }
@@ -48,6 +53,7 @@ export function initial(
     tray: [],
     bonuses: structuredClone(setup.bonuses ?? []),
     combo: 0,
+    maxCombo: 0,
     lastMatchMs: null,
     streak: 0,
     runCount: 0,
@@ -69,6 +75,7 @@ const snapshot = (s: State): Snapshot => ({
   tray: s.tray,
   bonuses: s.bonuses,
   combo: s.combo,
+  maxCombo: s.maxCombo,
   lastMatchMs: s.lastMatchMs,
   streak: s.streak,
   runCount: s.runCount,
@@ -89,7 +96,7 @@ export function match(s: State, a: string, b: string): State {
     tiles,
     selected: null,
     history: [...s.history, snapshot(s)],
-    status: status(tiles, s.tray),
+    status: status(tiles, s.tray, trayCap(s)),
   };
 }
 /**
@@ -112,7 +119,7 @@ export function pick(s: State, id: string): State {
     tray,
     selected: null,
     history: [...s.history, snapshot(s)],
-    status: status(tiles, tray),
+    status: status(tiles, tray, trayCap(s)),
   };
 }
 /** The tray tile a free board tile would complete right now, if any. */
@@ -140,13 +147,17 @@ export function returnTray(s: State): State {
  */
 function tick(s: State, ms: number): State {
   const elapsedMs = s.elapsedMs + ms,
-    timed = tickBonuses(s, ms);
+    frozen = (s.freezeMs ?? 0) > 0,
+    timed = frozen
+      ? { tiles: s.tiles, bonuses: s.bonuses, expired: [] as string[] }
+      : tickBonuses(s, ms);
   let next: State = {
     ...s,
     elapsedMs,
     tiles: timed.tiles,
     bonuses: timed.bonuses,
-    rush: tickRush(s.rush, ms),
+    rush: frozen ? s.rush : tickRush(s.rush, ms),
+    freezeMs: Math.max(0, (s.freezeMs ?? 0) - ms),
     combo: liveCombo({ ...s, elapsedMs }),
   };
   if (timed.expired.length)
@@ -160,11 +171,58 @@ function tick(s: State, ms: number): State {
         tray,
         score: next.score + next.rules.basePair,
         moves: next.moves + 1,
-        status: status(next.tiles, tray),
+        status: status(next.tiles, tray, trayCap(next)),
       };
       break;
     }
   return next;
+}
+// ---------- Power-ups ----------
+export const FREEZE_MS = 10000;
+/**
+ * Extra tray slot: 5 slots for the rest of this board. Also usable on a full
+ * tray, turning "Tray full" back into play.
+ */
+export function extraSlot(s: State): State {
+  if ((s.status !== "playing" && s.status !== "lost") || trayCap(s) > TRAY_SIZE)
+    return s;
+  const traySize = TRAY_SIZE + 1;
+  return { ...s, traySize, status: status(s.tiles, s.tray, traySize) };
+}
+/** Freeze: bonus and Rush timers stop for 10 s of play. */
+export function freeze(s: State): State {
+  return s.status === "playing"
+    ? { ...s, freezeMs: (s.freezeMs ?? 0) + FREEZE_MS }
+    : s;
+}
+/**
+ * Magnet: pulls the partner of a waiting tray tile off the board (even from
+ * under other tiles) and clears the pair; with nothing waiting, clears one
+ * free pair. It scores like a normal match and undo can take it back.
+ */
+export function magnet(s: State): State {
+  if (s.status !== "playing") return s;
+  for (const id of s.tray) {
+    const t = byId(s, id),
+      onBoard = s.tiles.filter((o) => !o.removed && compatible(t, o)),
+      partner = onBoard.find((o) => isTileFree(s, o.id)) ?? onBoard[0];
+    if (!partner) continue;
+    const tiles = s.tiles.map((o) =>
+        o.id === partner.id ? { ...o, removed: true } : o,
+      ),
+      tray = s.tray.filter((x) => x !== id);
+    return {
+      ...s,
+      ...settlePair(s, t, partner, { tiles, tray }),
+      tiles,
+      tray,
+      selected: null,
+      history: [...s.history, snapshot(s)],
+      status: status(tiles, tray, trayCap(s)),
+    };
+  }
+  const pair = listLegalPairs(s)[0];
+  return pair ? match(s, ...pair) : s;
 }
 export function undo(s: State): State {
   if (s.status === "paused" || !s.history.length) return s;
@@ -173,7 +231,7 @@ export function undo(s: State): State {
     ...s,
     ...p,
     history: s.history.slice(0, -1),
-    status: status(p.tiles, p.tray),
+    status: status(p.tiles, p.tray, trayCap(s)),
   };
 }
 export type Action =
@@ -184,20 +242,29 @@ export type Action =
   | { type: "pause" }
   | { type: "resume" }
   | { type: "undo" }
-  | { type: "hint"; pair: Pair };
+  | { type: "hint"; pair: Pair }
+  | { type: "extraSlot" }
+  | { type: "freeze" }
+  | { type: "magnet" };
 export function applyAction(s: State, a: Action): State {
   switch (a.type) {
     case "match":
       return match(s, a.a, a.b);
     case "undo":
       return undo(s);
+    case "extraSlot":
+      return extraSlot(s);
+    case "freeze":
+      return freeze(s);
+    case "magnet":
+      return magnet(s);
     case "pick":
       return pick(s, a.id);
     case "pause":
       return s.status === "playing" ? { ...s, status: "paused" } : s;
     case "resume":
       return s.status === "paused"
-        ? { ...s, status: status(s.tiles, s.tray) }
+        ? { ...s, status: status(s.tiles, s.tray, trayCap(s)) }
         : s;
     case "tick":
       return s.status === "playing" && Number.isFinite(a.ms) && a.ms >= 0

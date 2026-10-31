@@ -70,6 +70,8 @@ export type Snapshot = {
   tray: string[];
   bonuses: Bonus[];
   combo: number;
+  /** Longest combo this run (missing on saves from before it existed). */
+  maxCombo?: number;
   /** Play time of the last match; drives combo expiry. */
   lastMatchMs: number | null;
   streak: number;
@@ -82,6 +84,11 @@ export type State = Snapshot & {
   elapsedMs: number;
   status: "playing" | "paused" | "won" | "stuck" | "lost";
   rules: Rules;
+  /** Tray slots on this board (4, or 5 after the extra-slot power-up).
+   *  Lives outside snapshots so undo never takes a used power-up back. */
+  traySize?: number;
+  /** Freeze power-up: bonus and Rush timers are paused while this runs down. */
+  freezeMs?: number;
 };
 export type Puzzle = {
   id: string;

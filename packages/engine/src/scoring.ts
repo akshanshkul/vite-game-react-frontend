@@ -53,6 +53,7 @@ export function settlePair(
     score: s.score + points,
     moves,
     combo,
+    maxCombo: Math.max(s.maxCombo ?? 0, combo),
     lastMatchMs: s.elapsedMs,
     streak,
     runCount,

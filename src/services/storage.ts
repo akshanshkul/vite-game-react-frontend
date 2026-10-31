@@ -36,6 +36,18 @@ export type Profile = {
   undos: number;
   /** 10-level milestones already paid out in undos. */
   undoMilestones: number;
+  /** Coins from daily rewards, missions and chests (on top of 25 per win). */
+  bonusCoins?: number;
+  /** 7-day login calendar: last claimed day (1–7) and its local date. */
+  login?: { day: number; lastClaim: string | null };
+  /** Today's mission progress; reset when the local date changes. */
+  today?: import("./daily").TodayStats;
+  /** Stars toward the next chest (0–14), chests waiting, chests opened. */
+  chestStars?: number;
+  chests?: number;
+  chestsOpened?: number;
+  /** Power-ups owned. */
+  powerUps?: Partial<Record<import("./chests").PowerUp, number>>;
 };
 export type Save = {
   id: string;
@@ -102,7 +114,7 @@ export function validState(value: unknown): value is State {
       !Number.isSafeInteger(p.streak) ||
       !Number.isSafeInteger(p.runCount) ||
       !Array.isArray(p.tray) ||
-      p.tray.length > 4 ||
+      p.tray.length > 5 ||
       p.tray.some((id) => !p.tiles.some((t) => t.id === id && t.removed)) ||
       ![p.score, p.moves, p.hints, p.shuffles].every(
         (n) => Number.isSafeInteger(n) && n >= 0,
@@ -145,8 +157,9 @@ export function validState(value: unknown): value is State {
     ) &&
     Number.isFinite(s.elapsedMs) &&
     s.elapsedMs >= 0 &&
-    (s.status === status(s.tiles, s.tray) ||
-      (s.status === "paused" && status(s.tiles, s.tray) === "playing"))
+    (s.status === status(s.tiles, s.tray, s.traySize ?? 4) ||
+      (s.status === "paused" &&
+        status(s.tiles, s.tray, s.traySize ?? 4) === "playing"))
   );
 }
 export function complete(profile: Profile, id: string, s: State): Profile {
@@ -181,7 +194,9 @@ export const themePrices: Record<Settings["theme"], number> = {
   slate: 925,
 };
 export const balance = (p: Profile) =>
-  Object.keys(p.completed).length * 25 - (p.spent ?? p.purchases.length * 100);
+  Object.keys(p.completed).length * 25 +
+  (p.bonusCoins ?? 0) -
+  (p.spent ?? p.purchases.length * 100);
 /** Buys a theme if affordable; returns the profile unchanged otherwise. */
 export function buyTheme(p: Profile, theme: Settings["theme"]): Profile {
   const price = themePrices[theme];
